@@ -1,0 +1,13 @@
+{
+  "timestamp": "2026-11-15 14:07",
+  "futures_price": 0.0,
+  "spot_price": -7.5,
+  "diff": 7.5,
+  "atm_iv": 20.0,
+  "put_wall": 0.0,
+  "call_wall": 0.0,
+  "max_pain": 0.0,
+  "plan_a_dir": "SELL",
+  "plan_a_entry": -7.5,
+  "plan_a_tp1": -22.5
+}
