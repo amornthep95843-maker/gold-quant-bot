@@ -1,0 +1,43 @@
+name: Hizeiris Gold Quant Bot (Every 30 Mins)
+
+on:
+  schedule:
+    # รันอัตโนมัติทุกๆ 30 นาที ตลอด 24 ชั่วโมง (UTC)
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    # ปุ่มสำหรับกดสั่งรันทดสอบด้วยตัวเองจากหน้าเว็บ GitHub บน iPad
+
+permissions:
+  contents: write
+
+jobs:
+  run-quant-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies & Chromium
+        run: |
+          pip install playwright google-genai requests pandas numpy
+          playwright install chromium
+
+      - name: Run Hizeiris Quant Bot
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python hizeiris_auto_bot.py
+
+      - name: Save session_state.json for next round
+        run: |
+          git config --local user.email "bot@github-actions.local"
+          git config --local user.name "GoldQuantBot"
+          git add session_state.json || true
+          git diff --staged --quiet || git commit -m "Update session_state [skip ci]"
+          git push || true
