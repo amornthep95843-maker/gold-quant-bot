@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-11-15 14:07",
-  "futures_price": 0.0,
-  "spot_price": -7.5,
+  "timestamp": "2026-11-15 14:18",
+  "futures_price": 3877.2,
+  "spot_price": 3869.7,
   "diff": 7.5,
-  "atm_iv": 20.0,
-  "put_wall": 0.0,
-  "call_wall": 0.0,
-  "max_pain": 0.0,
-  "plan_a_dir": "SELL",
-  "plan_a_entry": -7.5,
-  "plan_a_tp1": -22.5
+  "atm_iv": 16.9,
+  "put_wall": 3800.0,
+  "call_wall": 4000.0,
+  "max_pain": 4000.0,
+  "plan_a_dir": "BUY",
+  "plan_a_entry": 3780.0,
+  "plan_a_tp1": 3795.0
 }
