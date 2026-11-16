@@ -74,45 +74,51 @@ def _compress_image_b64(path: str) -> Tuple[str, str]:
 
 
 def call_gemini_rest_fast(api_key: str, prompt_text: str, image_paths: List[str],
-                          timeout_sec: int = 32) -> str:
+                          timeout_sec: int = 45) -> str:
     parts = []
-    if image_paths and os.path.exists(image_paths[0]):
-        b64_data, mime = _compress_image_b64(image_paths[0])
-        parts.append({"inline_data": {"mime_type": mime, "data": b64_data}})
+    for img_path in image_paths[:2]:
+        if os.path.exists(img_path):
+            b64_data, mime = _compress_image_b64(img_path)
+            parts.append({"inline_data": {"mime_type": mime, "data": b64_data}})
     parts.append({"text": prompt_text})
 
     payload: Dict[str, object] = {
         "contents": [{"parts": parts}],
         "generationConfig": {
             "temperature": 0.15,
-            "thinkingConfig": {"thinkingBudget": 512},
+            "maxOutputTokens": 2048,
+            "thinkingConfig": {"thinkingBudget": 0},
         },
     }
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
 
-    try:
-        print(f"🤖 เรียก Gemini REST API วิเคราะห์เปรียบเทียบรอบเช้า vs รอบปัจจุบัน (จำกัดเวลา {timeout_sec}s)...")
-        if hasattr(signal, "SIGALRM"):
-            signal.signal(signal.SIGALRM, _alarm_handler)
-            signal.alarm(timeout_sec + 5)
+    for attempt in range(2):
         try:
-            resp = requests.post(url, json=payload, timeout=(8, timeout_sec))
-        finally:
+            print(f"🤖 เรียก AI Gemini 3.8 Flash ตรวจสอบซ้ำจากภาพกราฟจริง (รอบ {attempt + 1}/2, จำกัดเวลา {timeout_sec}s)...")
             if hasattr(signal, "SIGALRM"):
-                signal.alarm(0)
+                signal.signal(signal.SIGALRM, _alarm_handler)
+                signal.alarm(timeout_sec + 5)
+            try:
+                resp = requests.post(url, json=payload, timeout=(10, timeout_sec))
+            finally:
+                if hasattr(signal, "SIGALRM"):
+                    signal.alarm(0)
 
-        if resp.status_code == 200:
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if candidates:
-                for part in candidates[0].get("content", {}).get("parts", []):
-                    if "text" in part and not part.get("thought", False):
-                        if part["text"].strip():
-                            return part["text"]
-    except Exception as e:
-        print(f"⚡ ใช้ระบบสร้างรายงานวิจัยฉบับเต็ม Modules 1–6 จาก Python ทันที ({str(e)[:80]})")
-    raise RuntimeError("Fallback to full deterministic quantitative report")
+            if resp.status_code == 200:
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                if candidates:
+                    for part in candidates[0].get("content", {}).get("parts", []):
+                        if "text" in part and not part.get("thought", False):
+                            if part["text"].strip():
+                                return part["text"]
+            print(f"⚠️ AI ตอบกลับ HTTP {resp.status_code} ({resp.text[:120]}) -> ลองใหม่อีกครั้ง...")
+            time.sleep(2)
+        except Exception as e:
+            print(f"⚠️ AI รอบ {attempt + 1} ขัดข้อง ({str(e)[:80]})")
+            time.sleep(2)
+    raise RuntimeError("AI audit timed out after 2 attempts")
 
 
 # ==============================================================================
@@ -1380,23 +1386,33 @@ def synthesize_full_report(snap: HizeirisSnapshot, exact_calc: Dict, capture: Op
         return base_full_report
 
     mvc = exact_calc["morning_vs_current"]
+    tb = exact_calc["sd_table_exact"]
+    ws = exact_calc["walls_spot"]
     prompt = (
-        f"คุณคือ Quantitative Derivatives Analyst จงอ่านภาพกราฟที่แนบมานี้ แล้วสรุปเฉพาะ 'ความเห็นเปรียบเทียบระหว่างกรอบ Fix ตอนเช้า (DTE 0.8) กับข้อมูลกราฟรอบปัจจุบัน' "
-        f"(เช่น เลขสัญญา Put/Call บนหัวเสาที่โดดเด่นในรอบนี้, การเปลี่ยนแปลงของเส้นเขียว Vol สด เทียบเส้นประแดง Vol Settle และเทียบกับตอนเช้า, "
-        f"และจุดที่รถไม่มีเบรกกำลังเคลื่อนที่ระหว่างเสาปั๊มน้ำมัน) ความยาว 6–10 บรรทัดกระชับชัดเจน:\n"
-        f"ข้อมูลสรุป: {mvc['morning_vs_now_summary']}"
+        "คุณคือ Quantitative Derivatives & Market Microstructure Auditor (Mtraders Masterclass & AI CME Analyst)\n"
+        "จงดูภาพหน้าจอเว็บ Hizeiris ทั้ง 2 ภาพ (ภาพที่ 1: แท็บ SD·diff กรอบ Fix เช้า DTE 0.8 และภาพที่ 2: แท็บ CME·Vol รอบปัจจุบัน) "
+        "แล้ววิเคราะห์ตรวจสอบซ้ำ (Cross-Check) เปรียบเทียบกับตัวเลขที่ Python คำนวณไว้ให้ครบ 4 ข้อนี้ (ห้ามใช้ ICT/SMC เด็ดขาด):\n"
+        "1. **ตรวจความถูกต้องตัวเลขบนภาพ**: ยืนยันว่า Futures, Diff, ราคาเปิดเช้า, 1SD/2SD/3SD และ Call Wall / Put Wall / Max Pain ตรงกับบนภาพหรือไม่ (ถ้ามีจุดต่างให้แจ้งทันที)\n"
+        "2. **อ่านหัวเสา Put/Call จริงบนกราฟ Intraday Volume & OI**: ระบุ Strike ที่มีเสาสูงเด่นพร้อมตัวเลข `Put/Call` (สีส้ม/สีฟ้า) และชี้ว่าจุดไหนคือปั๊มน้ำมันของโมเดลรถไม่มีเบรกในรอบนี้\n"
+        "3. **วิเคราะห์เส้นเขียว Vol สด vs เส้นประแดง Vol Settle (ทั้ง 2 ฝั่ง)**: อธิบายความเบ้ (Skew) ที่ปีกซ้าย (Put) และปีกขวา (Call) เทียบกับตอนเช้าว่าหนุน Vanna Bounce หรือระวัง Squeeze\n"
+        "4. **คำตัดสินยืนยันแผนเทรด (AI Verdict)**: สรุปว่าแผนหลักและแผน 6 โซน Fixed SD (1SD/2SD/3SD SELL & BUY) ในรอบนี้ควรเน้นดักโซนไหนมากที่สุดและมีจุดเฝ้าระวังใดเป็นพิเศษ\n\n"
+        f"[ข้อมูลเปรียบเทียบที่ Python คำนวณ]:\n{mvc['morning_vs_now_summary']}\n"
+        f"Spot ปัจจุบัน: {exact_calc['spot']:.2f} | OpenSpot: {exact_calc['open_spot']:.2f} | Diff: {snap.diff:.2f}\n"
+        f"Fixed SD เช้า: 1SD Buy/Sell = {tb['buy_1sd']:.2f}/{tb['sell_1sd']:.2f} | 2SD Buy/Sell = {tb['buy_2sd']:.2f}/{tb['sell_2sd']:.2f} | 3SD Buy/Sell = {tb['buy_3sd']:.2f}/{tb['sell_3sd']:.2f}\n"
+        f"Walls: PutWall {ws['put_wall_spot']:.2f} | CallWall {ws['call_wall_spot']:.2f} | MaxPain {ws['max_pain_spot']:.2f}"
     )
 
     try:
-        ai_chart_note = call_gemini_rest_fast(
+        ai_audit = call_gemini_rest_fast(
             api_key=api_key,
             prompt_text=prompt,
-            image_paths=capture["screenshot_paths"][:1],
-            timeout_sec=28,
+            image_paths=capture["screenshot_paths"][:2],
+            timeout_sec=45,
         )
-        return f"{base_full_report}\n\n🔬 *หมายเหตุสแกนกราฟเสา Put/Call & เปรียบเทียบรอบเช้า vs รอบปัจจุบันจากภาพ (AI Vision)*:\n{ai_chart_note.strip()}"
+        return f"{base_full_report}\n\n🤖 *7. AI ตรวจสอบและวิเคราะห์ซ้ำจากภาพกราฟจริง (AI Cross-Check & Chart Audit)*:\n{ai_audit.strip()}"
     except Exception:
-        return base_full_report
+        return f"{base_full_report}\n\n🤖 *7. AI Cross-Check*: รอบนี้เซิร์ฟเวอร์ AI ตอบช้าเกินกำหนด ระบบจึงส่งรายงานคำนวณเชิงปริมาณ Modules 1–6 จาก Python ฉบับเต็มให้แทน"
+
 
 
 def send_telegram_photos(photo_captions: List[Tuple[str, str]], token: str, chat_id: str) -> None:
