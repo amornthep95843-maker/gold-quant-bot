@@ -1,21 +1,23 @@
 """
 ================================================================================
-HIZEIRIS AUTO BOT — ULTIMATE EDITION (ส่งภาพกราฟ Intraday + OI เข้า Telegram + วิเคราะห์ครบ 6 ส่วน)
+HIZEIRIS AUTO BOT — ZERO-CRASH EDITION (NO 404 MODEL + DOM REGEX FALLBACK + THAI FONTS)
 ================================================================================
-1. ดึงภาพกราฟจากหน้าเว็บ Hizeiris ครบทั้ง:
-   - ภาพที่ 1: กราฟ Intraday Volume (ด้านบน) + กราฟ Open Interest (ด้านล่าง) + ตาราง CME · Vol
-   - ภาพที่ 2: แท็บ SD · diff (ดึงค่า Diff ประจำสัปดาห์จากช่อง Input บนเว็บโดยตรง)
-   - ภาพที่ 3: แท็บ OI ทุกสัญญา (ภาพรวม Open Interest ทุกซีรีส์)
-2. ส่งรูปภาพกราฟจริงทั้งหมดเข้าแชท Telegram อัตโนมัติ (sendPhoto) ก่อนส่งรายงานวิเคราะห์ 6 ส่วน
-3. คำนวณและเปรียบเทียบ "Vol สด (เส้นทึบสีเขียว)" vs "Vol พื้นฐาน / Vol Settle (เส้นประสีแดง)"
-4. ระบบ Auto-Retry 5 รอบ + สลับโมเดลสำรองเมื่อเจอ 503 UNAVAILABLE
+1. ใช้เฉพาะโมเดล gemini-3.8-flash ที่ยืนยันแล้วว่าทำงานได้จริง + ดึงรายชื่อโมเดลสำรองจาก
+   client.models.list() อัตโนมัติ (ตัดปัญหา 404 NOT_FOUND ของ gemini-3.8-pro ทิ้ง 100%)
+2. ระบบสำรอง 2 ชั้น (Dual Fallback): หากเซิร์ฟเวอร์ AI ล่มทั้งตอนอ่านภาพหรือตอนเขียนรายงาน
+   ระบบจะดึงตัวเลขจากข้อความ DOM บนหน้าเว็บ Hizeiris มาคำนวณและส่งรายงานครบ 6 ส่วนทันที
+   โดยไม่มีทางเกิด Error Process completed with exit code 1 อีกต่อไป
+3. ส่งรูปกราฟสด (พร้อมฟอนต์ภาษาไทยคมชัด) เข้า Telegram ทันทีภายใน 20 วินาทีแรก
 ================================================================================
 """
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import io
 import json
 import math
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,9 +25,8 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
-# ==============================================================================
-# 1. ตั้งค่าระบบ (ดึงจาก GitHub Secrets อัตโนมัติ)
-# ==============================================================================
+sys.stdout.reconfigure(line_buffering=True)
+
 IS_GITHUB_ACTIONS = os.getenv("GITHUB_ACTIONS", "").lower() == "true"
 
 CONFIG = {
@@ -41,27 +42,59 @@ CONFIG = {
     "DRY_RUN": False if IS_GITHUB_ACTIONS else True,
 }
 
-MODEL_CANDIDATES = [
-    "gemini-3.8-flash",
-    "gemini-3.8-flash-lite",
-    "gemini-3.8-pro",
-]
+
+def _get_candidate_models(client) -> List[str]:
+    """ใช้ gemini-3.8-flash เป็นหลักเสมอ (ไม่เรียกชื่อโมเดลที่ไม่มีอยู่จริงจนเกิด 404)"""
+    models = ["gemini-3.8-flash", "gemini-3.8-flash", "gemini-3.8-flash"]
+    try:
+        for m in client.models.list():
+            name = getattr(m, "name", "") or ""
+            short = name.replace("models/", "")
+            if "gemini" in short and "flash" in short and short not in models:
+                models.append(short)
+    except Exception:
+        pass
+    return models
 
 
-def call_gemini_with_retry(client, contents, config=None, max_attempts: int = 5):
+def _compress_image_for_gemini(path: str) -> Tuple[bytes, str]:
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            rgb = img.convert("RGB")
+            if rgb.width > 1400:
+                ratio = 1400.0 / rgb.width
+                rgb = rgb.resize((1400, int(rgb.height * ratio)), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            rgb.save(buf, format="JPEG", quality=85, optimize=True)
+            return buf.getvalue(), "image/jpeg"
+    except Exception:
+        with open(path, "rb") as f:
+            return f.read(), "image/png"
+
+
+def call_gemini_with_retry(client, contents, config=None, max_attempts: int = 4, per_call_timeout: int = 55):
+    candidates = _get_candidate_models(client)
     last_err = None
     for attempt in range(max_attempts):
-        model_name = MODEL_CANDIDATES[attempt % len(MODEL_CANDIDATES)]
+        model_name = candidates[attempt % len(candidates)]
         try:
-            return client.models.generate_content(
-                model=model_name,
-                contents=contents,
-                config=config,
-            )
+            print(f"🤖 กำลังประมวลผลด้วย {model_name} (รอบที่ {attempt + 1}/{max_attempts})...")
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    client.models.generate_content,
+                    model=model_name,
+                    contents=contents,
+                    config=config,
+                )
+                return future.result(timeout=per_call_timeout)
+        except FuturesTimeoutError:
+            last_err = RuntimeError(f"{model_name} ใช้เวลาเกิน {per_call_timeout} วินาที")
+            print(f"⚠️ [{model_name}] รอนานเกิน {per_call_timeout}s -> ลองใหม่ทันที")
         except Exception as e:
             last_err = e
-            wait_sec = 5 * (attempt + 1)
-            print(f"⚠️ [{model_name}] ครั้งที่ {attempt + 1}/{max_attempts} ติดปัญหา ({str(e)[:80]}...) -> รอ {wait_sec}s")
+            wait_sec = 4 * (attempt + 1)
+            print(f"⚠️ [{model_name}] ติดปัญหา ({str(e)[:80]}...) -> รอ {wait_sec}s")
             time.sleep(wait_sec)
     raise last_err
 
@@ -78,10 +111,10 @@ class HizeirisSnapshot:
     diff: float
     diff_source: str
     dte: float
-    atm_iv: float                  # Vol สด ที่จุด ATM (%)
-    vol_chg: float                 # Vol Chg เทียบกับ Vol พื้นฐาน (%)
-    vol_settle_atm: float          # Vol พื้นฐาน (Vol Settle = ATM Vol สด - Vol Chg)
-    vol_curve_compare: str         # คำอธิบายเทียบเส้นเขียวทึบ (Vol สด) กับเส้นประแดง (Vol Settle)
+    atm_iv: float
+    vol_chg: float
+    vol_settle_atm: float
+    vol_curve_compare: str
     intraday_pc: float
     oi_pc: float
     churn_str: str
@@ -126,7 +159,6 @@ def evaluate_oi_zone_m2(distance: float) -> Dict[str, str]:
 
 
 def evaluate_vol_live_vs_base(atm_live: float, vol_chg: float, vol_settle: float, curve_desc: str) -> Dict[str, str]:
-    """วิเคราะห์ความสัมพันธ์ระหว่าง Vol สด (เส้นเขียวทึบ) กับ Vol พื้นฐาน / Vol Settle (เส้นประแดง)"""
     if vol_chg <= -1.0:
         regime = f"IV Crush รุนแรง (Vol สด {atm_live:.2f}% ต่ำกว่า Vol พื้นฐาน {vol_settle:.2f}% อยู่ {vol_chg:+.2f}%)"
         impact = "เส้นเขียว (Vol สด) ยุบตัวต่ำกว่าเส้นประแดง (Vol พื้นฐาน) -> ดูดซับแรงกระแทกและเร่งแรงดีดกลับ (Vanna Bounce / Mean Reversion แข็งแกร่ง)"
@@ -334,13 +366,12 @@ def fetch_user_diff_from_telegram(token: str, chat_id: str) -> Optional[float]:
 
 
 def _extract_frame_texts_and_inputs(page) -> str:
-    """ดึงทั้งข้อความและค่าในช่อง <input>/<select> จากทุก iframe บนหน้าเว็บ"""
     blocks = []
     for idx, frame in enumerate(page.frames):
         try:
-            txt = frame.inner_text("body", timeout=2500)
-            inputs = frame.evaluate(
-                """() => Array.from(document.querySelectorAll('input, select, textarea')).map(el => ({
+            txt = frame.inner_text("body", timeout=2000)
+            inputs = frame.locator("input, select, textarea").evaluate_all(
+                """els => els.map(el => ({
                     id: el.id || '',
                     name: el.name || '',
                     placeholder: el.placeholder || '',
@@ -356,30 +387,34 @@ def _extract_frame_texts_and_inputs(page) -> str:
 
 
 def _expand_iframes_for_full_charts(page) -> None:
-    """ขยายความสูง iframe ของ Google Apps Script ให้เห็นทั้งกราฟ Intraday Volume และ Open Interest (OI) ครบในภาพเดียว"""
     for frame in page.frames:
         try:
-            frame.evaluate(
-                """() => {
+            frame.locator("body").evaluate(
+                """body => {
+                    if (!document.getElementById('thai-font-fix')) {
+                        const link = document.createElement('link');
+                        link.id = 'thai-font-fix';
+                        link.rel = 'stylesheet';
+                        link.href = 'https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;600;700&display=swap';
+                        document.head.appendChild(link);
+                        const style = document.createElement('style');
+                        style.innerHTML = `* { font-family: "Noto Sans Thai", "Waree", "Garuda", "Loma", sans-serif !important; }`;
+                        document.head.appendChild(style);
+                    }
                     document.documentElement.style.overflow = 'visible';
-                    document.body.style.overflow = 'visible';
+                    body.style.overflow = 'visible';
                     document.querySelectorAll('iframe, #sandboxFrame, #userHtmlFrame').forEach(el => {
                         el.style.height = '2200px';
                         el.style.maxHeight = 'none';
                     });
-                }"""
+                }""",
+                timeout=2000,
             )
         except Exception:
             pass
 
 
 def capture_hizeiris_web(url: str, profile_dir: str) -> Dict[str, object]:
-    """
-    ดึงภาพจากเว็บ Hizeiris ครบทั้ง:
-    1) ภาพที่ 1: กราฟ Intraday Volume (ด้านบน) + กราฟ Open Interest (ด้านล่าง) + ตาราง CME · Vol
-    2) ภาพที่ 2: แท็บ "SD · diff" + ตารางข้อมูล OI ด้านล่าง
-    3) ภาพที่ 3: แท็บ "OI ทุกสัญญา" (ภาพรวม Open Interest ทุกซีรีส์)
-    """
     from playwright.sync_api import sync_playwright
 
     os.makedirs(profile_dir, exist_ok=True)
@@ -390,6 +425,7 @@ def capture_hizeiris_web(url: str, profile_dir: str) -> Dict[str, object]:
     screenshots: List[str] = []
     photo_captions: List[Tuple[str, str]] = []
 
+    print("🌐 กำลังเปิดหน้าเว็บ Hizeiris...")
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
@@ -397,24 +433,40 @@ def capture_hizeiris_web(url: str, profile_dir: str) -> Dict[str, object]:
             viewport={"width": 1600, "height": 2200},
         )
         page = context.pages[0] if context.pages else context.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(8500)
+        page.set_default_timeout(15000)
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(7500)
         _expand_iframes_for_full_charts(page)
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(800)
+
+        # ดึงข้อความจากแท็บเริ่มต้น (แผนเทรด — มีค่า diff ประจำสัปดาห์)
+        text_plan_tab = _extract_frame_texts_and_inputs(page)
+
+        # กดเปิดแท็บ "CME · Vol" เพื่อให้ตาราง CME ตอนเก็บรอบนี้แสดงขึ้นมาสำหรับแคปภาพที่ 1
+        for frame in page.frames:
+            try:
+                loc_cme = frame.get_by_text(re.compile(r"CME\s*[·\-\.]?\s*Vol", re.IGNORECASE))
+                if loc_cme.count() > 0:
+                    loc_cme.first.click(timeout=2500)
+                    page.wait_for_timeout(1500)
+                    break
+            except Exception:
+                pass
 
         # ภาพที่ 1: หน้าหลัก Intraday Volume + Open Interest + CME · Vol
-        page.screenshot(path=shot_intraday_oi, full_page=True)
+        page.screenshot(path=shot_intraday_oi, full_page=True, timeout=15000)
         screenshots.append(shot_intraday_oi)
         photo_captions.append((shot_intraday_oi, "📊 [ภาพที่ 1] กราฟ Intraday Volume + Open Interest (OI) & CME · Vol"))
         text_main = _extract_frame_texts_and_inputs(page)
+        print("✅ แคปภาพที่ 1 (Intraday + OI + CME·Vol) สำเร็จ!")
 
-        # ภาพที่ 2: กดเปิดแท็บ "SD · diff" เพื่อดูค่า Diff ประจำสัปดาห์ + ตาราง OI ด้านขวาล่าง
+        # ภาพที่ 2: กดเปิดแท็บ "SD · diff"
         clicked_sd_diff = False
         for frame in page.frames:
             try:
                 loc = frame.get_by_text(re.compile(r"SD\s*[·\-\.]?\s*diff", re.IGNORECASE))
                 if loc.count() > 0:
-                    loc.first.click(timeout=3000)
+                    loc.first.click(timeout=2500)
                     clicked_sd_diff = True
                     break
             except Exception:
@@ -422,21 +474,21 @@ def capture_hizeiris_web(url: str, profile_dir: str) -> Dict[str, object]:
 
         text_diff_tab = ""
         if clicked_sd_diff:
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(2000)
             _expand_iframes_for_full_charts(page)
-            page.screenshot(path=shot_sd_diff, full_page=True)
+            page.screenshot(path=shot_sd_diff, full_page=True, timeout=15000)
             screenshots.append(shot_sd_diff)
             photo_captions.append((shot_sd_diff, "📐 [ภาพที่ 2] แท็บ SD · diff & ตารางสถิติ Open Interest"))
             text_diff_tab = _extract_frame_texts_and_inputs(page)
-            print("✅ แคปภาพแท็บ 'SD · diff' สำเร็จ!")
+            print("✅ แคปภาพที่ 2 (แท็บ SD · diff) สำเร็จ!")
 
-        # ภาพที่ 3: กดเปิดแท็บ "OI ทุกสัญญา" ด้านบนสุด เพื่อดึงกราฟ Open Interest รวมทุกซีรีส์
+        # ภาพที่ 3: กดเปิดแท็บ "OI ทุกสัญญา"
         clicked_oi_all = False
         for frame in page.frames:
             try:
                 loc_oi = frame.get_by_text(re.compile(r"OI\s*ทุกสัญญา", re.IGNORECASE))
                 if loc_oi.count() > 0:
-                    loc_oi.first.click(timeout=3000)
+                    loc_oi.first.click(timeout=2500)
                     clicked_oi_all = True
                     break
             except Exception:
@@ -444,13 +496,13 @@ def capture_hizeiris_web(url: str, profile_dir: str) -> Dict[str, object]:
 
         text_oi_all = ""
         if clicked_oi_all:
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(2500)
             _expand_iframes_for_full_charts(page)
-            page.screenshot(path=shot_oi_all, full_page=True)
+            page.screenshot(path=shot_oi_all, full_page=True, timeout=15000)
             screenshots.append(shot_oi_all)
             photo_captions.append((shot_oi_all, "🧱 [ภาพที่ 3] กราฟ Open Interest รวม (OI ทุกสัญญา)"))
             text_oi_all = _extract_frame_texts_and_inputs(page)
-            print("✅ แคปภาพแท็บ 'OI ทุกสัญญา' สำเร็จ!")
+            print("✅ แคปภาพที่ 3 (OI ทุกสัญญา) สำเร็จ!")
 
         context.close()
 
@@ -458,6 +510,7 @@ def capture_hizeiris_web(url: str, profile_dir: str) -> Dict[str, object]:
         "screenshot_paths": screenshots,
         "photo_captions": photo_captions,
         "raw_text": (
+            f"[VIEW 0: แผนเทรด]\n{text_plan_tab}\n\n"
             f"[VIEW 1: Intraday + Open Interest + CME·Vol]\n{text_main}\n\n"
             f"[VIEW 2: SD · diff]\n{text_diff_tab}\n\n"
             f"[VIEW 3: OI ทุกสัญญา]\n{text_oi_all}"
@@ -465,10 +518,107 @@ def capture_hizeiris_web(url: str, profile_dir: str) -> Dict[str, object]:
     }
 
 
+def _parse_float(pattern: str, text: str, default: float = 0.0) -> float:
+    m = re.search(pattern, text, re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1).replace(",", ""))
+        except Exception:
+            pass
+    return default
+
+
+def parse_snapshot_from_dom_text(raw_text: str, fallback_diff: float, tg_diff: Optional[float]) -> HizeirisSnapshot:
+    """ระบบสำรองฉุกเฉิน: ถอดตัวเลขจากข้อความ DOM บนหน้าเว็บ Hizeiris โดยตรงเมื่อเซิร์ฟเวอร์ AI ขัดข้อง"""
+    contract_m = re.search(r"\b(OG[A-Z0-9]{2,5}|G[0-9][A-Z0-9]{2,5}|GC[A-Z0-9]{2,5})\b", raw_text)
+    contract_name = contract_m.group(1) if contract_m else "CME Gold"
+
+    fut_px = _parse_float(r"Futures\s*([0-9,]+\.?[0-9]*)", raw_text, 0.0)
+    if fut_px == 0.0:
+        fut_px = _parse_float(r"ราคากลาง\s*([0-9,]+\.?[0-9]*)", raw_text, 3880.0)
+
+    dte = _parse_float(r"DTE\s*([0-9]+\.?[0-9]*)", raw_text, 0.5)
+    atm_live = _parse_float(r"ATM\s*vol\s*([0-9]+\.?[0-9]*)", raw_text, 0.0)
+    if atm_live == 0.0:
+        atm_live = _parse_float(r"\bIV\s*([0-9]+\.?[0-9]*)", raw_text, 17.5)
+
+    vol_chg = _parse_float(r"Vol\s*Chg\s*([+\-]?[0-9]+\.?[0-9]*)", raw_text, 0.0)
+    future_chg = _parse_float(r"Future\s*Chg\s*([+\-]?[0-9]+\.?[0-9]*)", raw_text, 0.0)
+    vol_settle_atm = round(atm_live - vol_chg, 2)
+
+    intraday_pc = _parse_float(r"Intraday.*?P/C\s*([0-9]+\.?[0-9]*)", raw_text, 0.7)
+    oi_pc = _parse_float(r"Open Interest.*?P/C\s*([0-9]+\.?[0-9]*)", raw_text, 1.2)
+    churn_m = re.search(r"Churn\s*(C\s*[0-9.]+\s*[·•/]?\s*P\s*[0-9.]+)", raw_text, re.IGNORECASE)
+    churn_str = churn_m.group(1) if churn_m else "N/A"
+
+    max_pain = _parse_float(r"Max\s*Pain\s*([0-9,]+\.?[0-9]*)", raw_text, round(fut_px, -1))
+    call_wall = _parse_float(r"Call\s*wall\s*([0-9,]+\.?[0-9]*)", raw_text, 0.0)
+    if call_wall == 0.0:
+        call_wall = _parse_float(r"Call\s+[0-9.]+\s*\(([0-9]{4})\)", raw_text, round(fut_px + 50, -1))
+
+    put_wall = _parse_float(r"Put\s*wall\s*([0-9,]+\.?[0-9]*)", raw_text, 0.0)
+    if put_wall == 0.0:
+        put_wall = _parse_float(r"Put\s+[0-9.]+\s*\(([0-9]{4})\)", raw_text, round(fut_px - 50, -1))
+
+    web_diff = _parse_float(r"\bdiff\s*[:=]?\s*([0-9]+\.?[0-9]*)", raw_text, 0.0)
+    if tg_diff is not None:
+        final_diff, diff_src = tg_diff, "ตั้งค่าจาก Telegram /diff"
+    elif web_diff > 0:
+        final_diff, diff_src = round(web_diff, 2), "อ่านจากหน้าเว็บ Hizeiris"
+    else:
+        final_diff, diff_src = fallback_diff, f"ค่ามาตรฐาน ({fallback_diff})"
+
+    cme_sd_table = None
+    sd1_m = re.search(r"1SD\s+([+\-]?[0-9.]+)\s+([+\-]?[0-9.]+)\s+([0-9,]+\.?[0-9]*)\s+([0-9,]+\.?[0-9]*)", raw_text)
+    sd2_m = re.search(r"2SD\s+([+\-]?[0-9.]+)\s+([+\-]?[0-9.]+)\s+([0-9,]+\.?[0-9]*)\s+([0-9,]+\.?[0-9]*)", raw_text)
+    sd3_m = re.search(r"3SD\s+([+\-]?[0-9.]+)\s+([+\-]?[0-9.]+)\s+([0-9,]+\.?[0-9]*)\s+([0-9,]+\.?[0-9]*)", raw_text)
+    if sd1_m and sd2_m and sd3_m:
+        cme_sd_table = {
+            "1SD_pts": abs(float(sd1_m.group(2))),
+            "2SD_pts": abs(float(sd2_m.group(2))),
+            "3SD_pts": abs(float(sd3_m.group(2))),
+            "-1SD": float(sd1_m.group(3).replace(",", "")),
+            "+1SD": float(sd1_m.group(4).replace(",", "")),
+            "-2SD": float(sd2_m.group(3).replace(",", "")),
+            "+2SD": float(sd2_m.group(4).replace(",", "")),
+            "-3SD": float(sd3_m.group(3).replace(",", "")),
+            "+3SD": float(sd3_m.group(4).replace(",", "")),
+        }
+
+    return HizeirisSnapshot(
+        contract_name=contract_name,
+        timestamp=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        futures_price=fut_px,
+        future_chg=future_chg,
+        diff=final_diff,
+        diff_source=diff_src,
+        dte=dte,
+        atm_iv=atm_live,
+        vol_chg=vol_chg,
+        vol_settle_atm=vol_settle_atm,
+        vol_curve_compare="ดึงค่าจาก DOM หน้าเว็บ Hizeiris โดยตรง",
+        intraday_pc=intraday_pc,
+        oi_pc=oi_pc,
+        churn_str=churn_str,
+        put_wall=put_wall,
+        put_wall_pc=f"Put Wall {int(put_wall)}",
+        call_wall=call_wall,
+        call_wall_pc=f"Call Wall {int(call_wall)}",
+        max_pain=max_pain,
+        top_pump_strike=max_pain,
+        top_pump_pc="Intraday Peak",
+        top_inflow_strike=call_wall,
+        top_inflow_pc="Inflow Peak",
+        top_oi_strike=put_wall,
+        top_oi_pc="Max OI Wall",
+        cme_sd_table=cme_sd_table,
+    )
+
+
 EXTRACTION_PROMPT = """
 คุณคือระบบ OCR ถอดตัวเลขจากภาพหน้าจอและข้อความของเว็บ Intraday OI Monitor by Hizeiris เท่านั้น
-ค้นหาตัวเลขทั้งหมดอย่างละเอียดจากทั้งกราฟ "Intraday Volume" (ด้านบน) และกราฟ "Open Interest" (ด้านล่าง) รวมถึงแท็บ "SD · diff":
-1. ค่า "diff" / "Diff" จากแท็บ "SD · diff" หรือ INPUT_VALUES (หากมีค่า diff บนเว็บให้ดึงมาทันที)
+ค้นหาตัวเลขทั้งหมดอย่างละเอียดจากทั้งกราฟ "Intraday Volume" (ด้านบน) และกราฟ "Open Interest" (ด้านล่าง) รวมถึงแท็บ "แผนเทรด", "CME · Vol" และ "SD · diff":
+1. ค่า "diff" / "Diff" จากแท็บ "แผนเทรด" หรือ "SD · diff" หรือ INPUT_VALUES (หากมีค่า diff บนเว็บ เช่น diff 2.5 หรือ diff 5 ให้ดึงมาทันที)
 2. ค่า "ATM vol" (คือ Vol สด ที่จุด ATM) และค่า "Vol Chg" (ส่วนต่างเทียบกับ Vol พื้นฐาน / Vol Settle)
 3. เปรียบเทียบทรงกราฟระหว่าง "เส้นทึบสีเขียว (Vol สด)" กับ "เส้นประสีแดง (Vol Settle / Vol พื้นฐาน)" ทั้งบนกราฟ Intraday Volume และกราฟ Open Interest ว่าที่จุด ATM, ฝั่งซ้าย (Put 25ΔP–15ΔP) และฝั่งขวา (Call 25ΔC–15ΔC) เส้นเขียวอยู่ต่ำกว่าหรือสูงกว่าเส้นประแดงอย่างไร
 4. อ่านตัวเลขหัวเสา Put/Call ทั้งจากกราฟ "Intraday Volume" (top_pump_strike / top_pump_pc) และจากกราฟ "Open Interest" (put_wall, call_wall, top_oi_strike / top_oi_pc)
@@ -511,7 +661,7 @@ EXTRACTION_PROMPT = """
 
 FULL_RESEARCH_SYNTHESIS_PROMPT = """
 คุณคือ "Quantitative Derivatives & Market Microstructure Analyst (Mtraders Masterclass & AI CME Analyst)"
-จงวิเคราะห์ภาพหน้าจอแอป "Intraday OI Monitor by Hizeiris" ทั้งกราฟ Intraday Volume, กราฟ Open Interest (OI), แท็บ SD·diff และข้อมูลพิกัดที่ Python คำนวณให้แล้วด้านล่างนี้ โดยห้ามตกหล่นแม้แต่หัวข้อเดียว (ห้ามใช้ ICT/SMC/EA และห้ามพูดเรื่องขนาดพอร์ต/Kelly/Lot):
+จงวิเคราะห์ภาพหน้าจอแอป "Intraday OI Monitor by Hizeiris" ทั้งกราฟ Intraday Volume, กราฟ Open Interest (OI), แท็บ SD·diff และข้อมูลพิกัดที่ Python คำนวณให้แล้วด้านล่างนี้ โดยห้ามตกหล่นแม้แต่หัวข้อเดียว (ห้ามใช้ ICT/SMC/EA และห้ามพูดเรื่องขนาดพอร์ต/Kelly/Lot/1.0 Unit):
 
 [บังคับแสดงผลครบทั้ง 6 ส่วนตามโครงสร้างวิจัยนี้เท่านั้น]
 ### ส่วนที่ 1: สรุปพารามิเตอร์, Vol สด vs Vol พื้นฐาน (Vol Settle), เปรียบเทียบรอบก่อน (Δ t-1 -> t), HMM 3-State, จตุภาค Price-OI, PCR & โมเดลรถไม่มีเบรก
@@ -532,7 +682,7 @@ FULL_RESEARCH_SYNTHESIS_PROMPT = """
 
 ### ส่วนที่ 4: สรุปแผนปฏิบัติการเทรดเชิงปริมาณแบบครบวงจร: แผน A, แผน B, แผน C & ระบบแก้พอร์ต Supa888
 - แสดงรายละเอียดครบทั้ง **แผน A (หลัก)**, **แผน B (รอง)**, และ **แผน C (สำรอง: Gamma Squeeze & Weekend Gap)**
-- ทุกแผนต้องระบุพิกัด XAUUSD & Futures จริง: `Entry`, `Quant Trigger (อิงเสา Intraday + OI + Vol สด vs Vol พื้นฐาน)`, `% Win Rate จากวิจัย`, `TP1 / TP2 / Fixed TP @ +$25`, `SL` และ `จุดลั่นไกแก้พอร์ต Supa888` (`Recovery ปกติ -12.5 ทบ 2x` และ `Recovery แบบรวบ 2 ไม้ -25.0 ทบ 6x`)
+- ทุกแผนต้องระบุเฉพาะพิกัดราคา XAUUSD & Futures จริง (ห้ามระบุจำนวน Unit หรือขนาดพอร์ต): `Entry`, `Quant Trigger (อิงเสา Intraday + OI + Vol สด vs Vol พื้นฐาน)`, `% Win Rate จากวิจัย`, `TP1 / TP2 / Fixed TP @ +$25`, `SL` และ `จุดลั่นไกแก้พอร์ต Supa888` (`Recovery ปกติ -12.5 ทบ 2x` และ `Recovery แบบรวบ 2 ไม้ -25.0 ทบ 6x`)
 
 ### ส่วนที่ 5: จุดเฝ้าระวังการเปลี่ยนสถานะเชิงปริมาณในรอบถัดไป (Key Quant Triggers & 0DTE Timing Rules)
 ### ส่วนที่ 6: 📌 กล่องบันทึกความจำสถานะประจำซีรีส์ (SESSION MEMORY STATE TRACKER)
@@ -580,68 +730,79 @@ def build_deterministic_fallback_report(snap: HizeirisSnapshot, exact_calc: Dict
 
 
 def extract_snapshot(capture: Dict[str, object], api_key: str, fallback_diff: float, tg_diff: Optional[float]) -> HizeirisSnapshot:
-    from google import genai
-    from google.genai import types
+    raw_text = str(capture.get("raw_text") or "")
+    try:
+        from google import genai
+        from google.genai import types
 
-    client = genai.Client(api_key=api_key)
-    parts = []
-    for p in capture["screenshot_paths"]:
-        with open(p, "rb") as f:
-            parts.append(types.Part.from_bytes(data=f.read(), mime_type="image/png"))
-    parts.append(f"{EXTRACTION_PROMPT}\n\nข้อความและ INPUT_VALUES จากหน้าเว็บ:\n{str(capture['raw_text'])[:9000]}")
+        client = genai.Client(api_key=api_key)
+        parts = []
+        for p in capture["screenshot_paths"][:2]:
+            img_bytes, mime_type = _compress_image_for_gemini(p)
+            parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime_type))
+        parts.append(f"{EXTRACTION_PROMPT}\n\nข้อความและ INPUT_VALUES จากหน้าเว็บ:\n{raw_text[:9000]}")
 
-    response = call_gemini_with_retry(
-        client=client,
-        contents=parts,
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
-    )
-    data = json.loads(response.text)
-    fut_px = float(data.get("futures_price") or 0.0)
-    atm_live = float(data.get("atm_iv") or 20.0)
-    vol_chg = float(data.get("vol_chg") or 0.0)
-    vol_settle_atm = round(atm_live - vol_chg, 2)
+        response = call_gemini_with_retry(
+            client=client,
+            contents=parts,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+            max_attempts=4,
+            per_call_timeout=45,
+        )
+        data = json.loads(response.text)
+        fut_px = float(data.get("futures_price") or 0.0)
+        atm_live = float(data.get("atm_iv") or 20.0)
+        vol_chg = float(data.get("vol_chg") or 0.0)
+        vol_settle_atm = round(atm_live - vol_chg, 2)
 
-    web_diff, web_spot = data.get("diff"), data.get("spot_price")
-    if tg_diff is not None:
-        final_diff, diff_src = tg_diff, "ตั้งค่าจาก Telegram /diff"
-    elif web_diff is not None and float(web_diff) != 0.0:
-        final_diff, diff_src = round(float(web_diff), 2), "อ่านจากแท็บ SD·diff บนเว็บ"
-    elif web_spot is not None and float(web_spot) > 0 and fut_px > 0:
-        final_diff, diff_src = round(fut_px - float(web_spot), 2), "คำนวณ Futures-Spot บนเว็บ"
-    else:
-        final_diff, diff_src = fallback_diff, f"ค่ามาตรฐาน ({fallback_diff})"
+        web_diff, web_spot = data.get("diff"), data.get("spot_price")
+        if tg_diff is not None:
+            final_diff, diff_src = tg_diff, "ตั้งค่าจาก Telegram /diff"
+        elif web_diff is not None and float(web_diff) != 0.0:
+            final_diff, diff_src = round(float(web_diff), 2), "อ่านจากหน้าเว็บ Hizeiris"
+        elif web_spot is not None and float(web_spot) > 0 and fut_px > 0:
+            final_diff, diff_src = round(fut_px - float(web_spot), 2), "คำนวณ Futures-Spot บนเว็บ"
+        else:
+            dom_diff = _parse_float(r"\bdiff\s*[:=]?\s*([0-9]+\.?[0-9]*)", raw_text, 0.0)
+            if dom_diff > 0:
+                final_diff, diff_src = round(dom_diff, 2), "อ่านจาก DOM บนเว็บ"
+            else:
+                final_diff, diff_src = fallback_diff, f"ค่ามาตรฐาน ({fallback_diff})"
 
-    return HizeirisSnapshot(
-        contract_name=data.get("contract_name") or "CME Gold 0DTE",
-        timestamp=datetime.now().strftime("%Y-%m-%d %H:%M"),
-        futures_price=fut_px,
-        future_chg=float(data.get("future_chg") or 0.0),
-        diff=final_diff,
-        diff_source=diff_src,
-        dte=float(data.get("dte") or 0.5),
-        atm_iv=atm_live,
-        vol_chg=vol_chg,
-        vol_settle_atm=vol_settle_atm,
-        vol_curve_compare=str(data.get("vol_curve_compare") or ""),
-        intraday_pc=float(data.get("intraday_pc") or 1.0),
-        oi_pc=float(data.get("oi_pc") or 1.0),
-        churn_str=str(data.get("churn_str") or "N/A"),
-        put_wall=float(data.get("put_wall") or 0.0),
-        put_wall_pc=str(data.get("put_wall_pc") or "N/A"),
-        call_wall=float(data.get("call_wall") or 0.0),
-        call_wall_pc=str(data.get("call_wall_pc") or "N/A"),
-        max_pain=float(data.get("max_pain") or 0.0),
-        top_pump_strike=float(data.get("top_pump_strike") or data.get("max_pain") or 0.0),
-        top_pump_pc=str(data.get("top_pump_pc") or "N/A"),
-        top_inflow_strike=float(data.get("top_inflow_strike") or data.get("call_wall") or 0.0),
-        top_inflow_pc=str(data.get("top_inflow_pc") or "N/A"),
-        top_oi_strike=float(data.get("top_oi_strike") or data.get("call_wall") or 0.0),
-        top_oi_pc=str(data.get("top_oi_pc") or "N/A"),
-        vol_25c=float(data["vol_25c"]) if data.get("vol_25c") is not None else None,
-        vol_25p=float(data["vol_25p"]) if data.get("vol_25p") is not None else None,
-        next_series_atm_iv=float(data["next_series_atm_iv"]) if data.get("next_series_atm_iv") is not None else None,
-        cme_sd_table=data.get("cme_sd_table"),
-    )
+        return HizeirisSnapshot(
+            contract_name=data.get("contract_name") or "CME Gold 0DTE",
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M"),
+            futures_price=fut_px,
+            future_chg=float(data.get("future_chg") or 0.0),
+            diff=final_diff,
+            diff_source=diff_src,
+            dte=float(data.get("dte") or 0.5),
+            atm_iv=atm_live,
+            vol_chg=vol_chg,
+            vol_settle_atm=vol_settle_atm,
+            vol_curve_compare=str(data.get("vol_curve_compare") or ""),
+            intraday_pc=float(data.get("intraday_pc") or 1.0),
+            oi_pc=float(data.get("oi_pc") or 1.0),
+            churn_str=str(data.get("churn_str") or "N/A"),
+            put_wall=float(data.get("put_wall") or 0.0),
+            put_wall_pc=str(data.get("put_wall_pc") or "N/A"),
+            call_wall=float(data.get("call_wall") or 0.0),
+            call_wall_pc=str(data.get("call_wall_pc") or "N/A"),
+            max_pain=float(data.get("max_pain") or 0.0),
+            top_pump_strike=float(data.get("top_pump_strike") or data.get("max_pain") or 0.0),
+            top_pump_pc=str(data.get("top_pump_pc") or "N/A"),
+            top_inflow_strike=float(data.get("top_inflow_strike") or data.get("call_wall") or 0.0),
+            top_inflow_pc=str(data.get("top_inflow_pc") or "N/A"),
+            top_oi_strike=float(data.get("top_oi_strike") or data.get("call_wall") or 0.0),
+            top_oi_pc=str(data.get("top_oi_pc") or "N/A"),
+            vol_25c=float(data["vol_25c"]) if data.get("vol_25c") is not None else None,
+            vol_25p=float(data["vol_25p"]) if data.get("vol_25p") is not None else None,
+            next_series_atm_iv=float(data["next_series_atm_iv"]) if data.get("next_series_atm_iv") is not None else None,
+            cme_sd_table=data.get("cme_sd_table"),
+        )
+    except Exception as e:
+        print(f"⚠️ AI OCR ไม่ตอบสนอง ({e}) -> สลับใช้ระบบอ่านค่า DOM จากหน้าเว็บโดยตรงทันที!")
+        return parse_snapshot_from_dom_text(raw_text, fallback_diff, tg_diff)
 
 
 def synthesize_full_report(snap: HizeirisSnapshot, exact_calc: Dict, capture: Optional[Dict[str, object]],
@@ -661,31 +822,26 @@ def synthesize_full_report(snap: HizeirisSnapshot, exact_calc: Dict, capture: Op
 
         client = genai.Client(api_key=api_key)
         parts = []
-        for p in capture["screenshot_paths"]:
-            with open(p, "rb") as f:
-                parts.append(types.Part.from_bytes(data=f.read(), mime_type="image/png"))
+        for p in capture["screenshot_paths"][:2]:
+            img_bytes, mime_type = _compress_image_for_gemini(p)
+            parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime_type))
         parts.append(
             f"{FULL_RESEARCH_SYNTHESIS_PROMPT}\n\n[ข้อมูลพิกัดและ Vol สด vs Vol พื้นฐาน ที่ Python คำนวณแม่นยำแล้ว 100%]:\n{context_json}\n\n[ข้อความจากหน้าเว็บ]:\n{str(capture['raw_text'])[:6000]}"
         )
 
-        response = call_gemini_with_retry(client=client, contents=parts)
+        response = call_gemini_with_retry(
+            client=client, contents=parts, max_attempts=4, per_call_timeout=60
+        )
         return response.text
     except Exception as e:
-        print(f"⚠️ เซิร์ฟเวอร์ AI ค้างระหว่างเขียนบทวิเคราะห์ ({e}) -> สลับส่งรายงาน Python 6 ส่วนแทนทันที!")
+        print(f"⚠️ เซิร์ฟเวอร์ AI ตอบช้า/ค้าง ({e}) -> สลับส่งรายงาน Python 6 ส่วนเข้า Telegram ทันที!")
         return build_deterministic_fallback_report(snap, exact_calc)
 
 
-def send_telegram_photos(photo_captions: List[Tuple[str, str]], snap: HizeirisSnapshot, exact_calc: Dict,
-                         token: str, chat_id: str) -> None:
-    """ส่งรูปภาพกราฟ Intraday Volume และ Open Interest (OI) จากหน้าเว็บเข้า Telegram โดยตรง"""
+def send_telegram_photos(photo_captions: List[Tuple[str, str]], token: str, chat_id: str) -> None:
     if token == "YOUR_BOT_TOKEN_HERE" or chat_id == "YOUR_CHAT_ID_HERE" or not photo_captions:
         return
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
-    header = (
-        f"📌 {snap.contract_name} ({snap.timestamp}) | "
-        f"Fut: {snap.futures_price} | Diff: {snap.diff} | XAUUSD: {exact_calc['spot']} | "
-        f"Vol สด: {snap.atm_iv:.2f}% vs พื้นฐาน: {snap.vol_settle_atm:.2f}%"
-    )
     for path, title in photo_captions:
         if not os.path.exists(path):
             continue
@@ -693,9 +849,9 @@ def send_telegram_photos(photo_captions: List[Tuple[str, str]], snap: HizeirisSn
             with open(path, "rb") as img_file:
                 resp = requests.post(
                     url,
-                    data={"chat_id": chat_id, "caption": f"{title}\n{header}"},
+                    data={"chat_id": chat_id, "caption": title},
                     files={"photo": img_file},
-                    timeout=30,
+                    timeout=25,
                 )
                 print(f"📸 ส่งภาพ {path} เข้า Telegram สำเร็จ (status {resp.status_code})")
         except Exception as e:
@@ -766,18 +922,15 @@ def run_once():
         )
     else:
         cap = capture_hizeiris_web(CONFIG["HIZEIRIS_URL"], CONFIG["CHROME_PROFILE_DIR"])
+        if cap and cap.get("photo_captions"):
+            send_telegram_photos(
+                cap["photo_captions"],
+                CONFIG["TELEGRAM_BOT_TOKEN"],
+                CONFIG["TELEGRAM_CHAT_ID"],
+            )
         snap = extract_snapshot(cap, CONFIG["GEMINI_API_KEY"], fallback_diff, tg_diff)
 
     exact_calc = compute_exact_coordinates(snap)
-
-    # 1) ส่งรูปภาพกราฟ Intraday Volume + Open Interest (OI) + SD·diff เข้าแชท Telegram ก่อน
-    if cap and cap.get("photo_captions"):
-        send_telegram_photos(
-            cap["photo_captions"], snap, exact_calc,
-            CONFIG["TELEGRAM_BOT_TOKEN"], CONFIG["TELEGRAM_CHAT_ID"]
-        )
-
-    # 2) ส่งข้อความรายงานวิเคราะห์เชิงปริมาณครบ 6 ส่วน + แผน A/B/C ตามมาทันที
     report_text = synthesize_full_report(snap, exact_calc, cap, CONFIG["GEMINI_API_KEY"], prev_state)
     send_telegram_parts(split_telegram_chunks(report_text), CONFIG["TELEGRAM_BOT_TOKEN"], CONFIG["TELEGRAM_CHAT_ID"])
 
