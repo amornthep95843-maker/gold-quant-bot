@@ -1,14 +1,17 @@
 {
-  "timestamp": "2026-11-16 07:36",
-  "futures_price": 3858.0,
-  "spot_price": 3855.5,
+  "trading_day": "2026-11-16",
+  "timestamp": "2026-11-16 07:56",
+  "daily_open_fut": 6.0,
+  "fixed_dte": 0.8,
+  "sd_1_pts": 0.0,
+  "futures_price": 3860.6,
+  "spot_price": 3858.1,
   "diff": 2.5,
   "atm_iv": 17.5,
   "vol_settle_atm": 17.5,
   "put_wall": 3800.0,
   "call_wall": 3925.0,
   "max_pain": 3900.0,
-  "plan_a_dir": "BUY (ดักสวน Kill Zone -2SD / Put Wall)",
-  "plan_a_entry": 3783.5,
-  "plan_a_tp1": 3798.5
+  "plan_a_dir": "SELL (ดักสวน Kill Zone +2SD)",
+  "plan_a_entry": 3.5
 }
