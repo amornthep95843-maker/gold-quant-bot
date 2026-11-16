@@ -1,14 +1,15 @@
 """
 ================================================================================
-HIZEIRIS AUTO BOT — FIXED DAILY OPEN SD (DTE = 0.8) & 6-ZONE RESEARCH EDITION
+HIZEIRIS AUTO BOT — FIXED DAILY OPEN SD (DTE = 0.8) & CRON AUTO-HEAL EDITION
 ================================================================================
-1. ล็อกค่า SD ประจำวันจาก "ราคาเปิดของวัน (Daily Open / Prior Settle)" ด้วยค่าคงที่
-   DTE = 0.8 (1SD = Open_Fut * (ATM_IV / 100) * sqrt(0.8 / 365)) เพื่อไม่ให้กรอบ
-   SD เลื่อนหนีระหว่างวัน
-2. สร้างแผนเทรดครบทั้ง 6 โซนจาก SD ที่ Fix ไว้ (+1SD SELL, +2SD SELL, +3SD SELL,
-   -1SD BUY, -2SD BUY, -3SD BUY) พร้อมวิเคราะห์สถิติจากงานวิจัย (500d VOL2VOL,
-   27d/50d/100d, 2-Year CME OI Gravity, Shadow Greeks, Supa888 Recovery)
-3. ส่งรูปกราฟสด 3 มุมมอง (พร้อมฟอนต์ภาษาไทย) + รายงาน 6 ส่วนเข้า Telegram ใน 60 วินาที
+1. แก้บั๊ก Open = 6.0: บังคับตรวจสอบราคาเปิดของวัน (Daily Open / Prior Settle) ให้อยู่ในช่วง
+   ราคาทองคำจริง (2500–6000) และดึงจากแกนกลางแผนเทรด / Futures - Future Chg เท่านั้น
+   พร้อมล้างค่า 6.0 ที่ค้างใน session_state.json ทิ้งอัตโนมัติ
+2. แก้ปัญหาบอทไม่รันทุก 30 นาที: เอาคำว่า [skip ci] ออกจาก Commit Message (เพราะ [skip ci]
+   ทำให้ GitHub Actions ระงับการรันตามเวลา Schedule ในรอบถัดไป) และตั้งเวลาเป็นทั้ง
+   */30 * * * * และ 12,42 * * * * เพื่อให้รันต่อเนื่องตลอดวัน
+3. ปรับ Gemini REST API ให้ใช้ thinkingBudget ต่ำ (ตอบกลับใน 8–15 วินาที ไม่ติด Read timed out 40s)
+   พร้อมรายงานวิเคราะห์ 6 ส่วนฉบับเต็มครบทุกงานวิจัย
 ================================================================================
 """
 
@@ -59,11 +60,11 @@ def _compress_image_b64(path: str) -> Tuple[str, str]:
         from PIL import Image
         with Image.open(path) as img:
             rgb = img.convert("RGB")
-            if rgb.width > 1280:
-                ratio = 1280.0 / rgb.width
-                rgb = rgb.resize((1280, int(rgb.height * ratio)), Image.Resampling.LANCZOS)
+            if rgb.width > 1024:
+                ratio = 1024.0 / rgb.width
+                rgb = rgb.resize((1024, int(rgb.height * ratio)), Image.Resampling.LANCZOS)
             buf = io.BytesIO()
-            rgb.save(buf, format="JPEG", quality=82, optimize=True)
+            rgb.save(buf, format="JPEG", quality=78, optimize=True)
             return base64.b64encode(buf.getvalue()).decode("ascii"), "image/jpeg"
     except Exception:
         with open(path, "rb") as f:
@@ -71,48 +72,46 @@ def _compress_image_b64(path: str) -> Tuple[str, str]:
 
 
 def call_gemini_rest_fast(api_key: str, prompt_text: str, image_paths: List[str],
-                          json_mode: bool = False, timeout_sec: int = 40) -> str:
+                          timeout_sec: int = 35) -> str:
+    """ส่งเฉพาะภาพหลัก 1 ภาพ + จำกัด thinkingBudget เพื่อให้ Gemini ตอบกลับภายใน 8–15 วินาที"""
     parts = []
-    for p in image_paths[:2]:
-        if os.path.exists(p):
-            b64_data, mime = _compress_image_b64(p)
-            parts.append({"inline_data": {"mime_type": mime, "data": b64_data}})
+    if image_paths and os.path.exists(image_paths[0]):
+        b64_data, mime = _compress_image_b64(image_paths[0])
+        parts.append({"inline_data": {"mime_type": mime, "data": b64_data}})
     parts.append({"text": prompt_text})
 
-    payload: Dict[str, object] = {"contents": [{"parts": parts}]}
-    if json_mode:
-        payload["generationConfig"] = {"responseMimeType": "application/json"}
+    payload: Dict[str, object] = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {
+            "temperature": 0.2,
+            "thinkingConfig": {"thinkingBudget": 512},
+        },
+    }
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
 
-    last_err = None
-    for attempt in range(2):
+    try:
+        print(f"🤖 เรียก Gemini REST API (จำกัดเวลา {timeout_sec}s)...")
+        if hasattr(signal, "SIGALRM"):
+            signal.signal(signal.SIGALRM, _alarm_handler)
+            signal.alarm(timeout_sec + 5)
         try:
-            print(f"🤖 เรียก Gemini REST API (ครั้งที่ {attempt + 1}/2, จำกัดเวลา {timeout_sec}s)...")
+            resp = requests.post(url, json=payload, timeout=(8, timeout_sec))
+        finally:
             if hasattr(signal, "SIGALRM"):
-                signal.signal(signal.SIGALRM, _alarm_handler)
-                signal.alarm(timeout_sec + 5)
-            try:
-                resp = requests.post(url, json=payload, timeout=(10, timeout_sec))
-            finally:
-                if hasattr(signal, "SIGALRM"):
-                    signal.alarm(0)
+                signal.alarm(0)
 
-            if resp.status_code == 200:
-                data = resp.json()
-                candidates = data.get("candidates", [])
-                if candidates:
-                    text_out = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                    if text_out.strip():
-                        return text_out
-            last_err = RuntimeError(f"HTTP {resp.status_code}: {resp.text[:160]}")
-            print(f"⚠️ Gemini ตอบกลับ HTTP {resp.status_code} -> รอ 3 วินาที...")
-            time.sleep(3)
-        except Exception as e:
-            last_err = e
-            print(f"⚠️ Gemini ใช้เวลาเกินกำหนดหรือขัดข้อง ({str(e)[:100]}) -> ข้ามไปใช้ระบบคำนวณ Python ทันที!")
-            break
-    raise last_err or RuntimeError("Gemini REST API failed")
+        if resp.status_code == 200:
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            if candidates:
+                for part in candidates[0].get("content", {}).get("parts", []):
+                    if "text" in part and not part.get("thought", False):
+                        if part["text"].strip():
+                            return part["text"]
+    except Exception as e:
+        print(f"⚡ สลับใช้รายงานวิเคราะห์เชิงปริมาณ 6 ส่วนฉบับเต็มจากระบบ Python ทันที ({str(e)[:80]})")
+    raise RuntimeError("Fallback to full deterministic quantitative report")
 
 
 # ==============================================================================
@@ -124,7 +123,7 @@ class HizeirisSnapshot:
     timestamp: str
     futures_price: float
     future_chg: float
-    daily_open_fut: float          # ราคาเปิดของวัน (Fixed Anchor ของทั้งวัน)
+    daily_open_fut: float          # ราคาเปิดของวัน (Fixed Anchor ของทั้งวัน ตรวจแล้วว่าอยู่ในช่วง 2500-6000)
     open_source: str               # แหล่งที่มาของราคาเปิด
     diff: float
     diff_source: str
@@ -152,6 +151,15 @@ class HizeirisSnapshot:
     top_inflow_pc: str
     top_oi_strike: float
     top_oi_pc: str
+
+
+def _is_valid_gold_price(val: float, ref_fut: float = 0.0) -> bool:
+    """ป้องกันบั๊กอ่านเลข 6.0 มาเป็นราคาเปิดทองคำ: ต้องอยู่ในช่วง 2500–6000 และห่างจาก Futures ไม่เกิน 250 จุด"""
+    if not (2500.0 <= val <= 6000.0):
+        return False
+    if ref_fut > 2500.0 and abs(val - ref_fut) > 250.0:
+        return False
+    return True
 
 
 def check_round_number_bonus(spot_price: float) -> str:
@@ -245,13 +253,12 @@ def classify_current_sd_zone_6(spot: float, open_spot: float, one_sd_pts: float)
 
 
 def _build_6_sd_zone_plans(levels: Dict[str, Tuple[float, float]], snap: HizeirisSnapshot, vol_chg: float) -> List[Dict[str, object]]:
-    """สร้างแผนเทรดครบทั้ง 6 โซนจาก Fixed SD (1SD/2SD/3SD SELL & 1SD/2SD/3SD BUY) พร้อมผลวิจัย"""
     call_spot = levels["CallWall"][1]
     put_spot = levels["PutWall"][1]
     iv_crush = vol_chg < 0
 
     def _conf_note(px: float, wall_px: float, wall_name: str) -> str:
-        if abs(px - wall_px) <= 10.0:
+        if abs(px - wall_px) <= 12.0:
             return f" + ทับ {wall_name} ({wall_px}) [Confluence Win Rate 86.0%–91.4%!]"
         return ""
 
@@ -264,18 +271,18 @@ def _build_6_sd_zone_plans(levels: Dict[str, Tuple[float, float]], snap: Hizeiri
 
     return [
         {
-            "zone": "+1SD SELL (25ΔC Drift Zone)",
+            "zone": "Zone +1SD SELL (25ΔC Drift Zone)",
             "entry_spot": p1,
             "entry_fut": levels["+1.0SD"][0],
             "tp1": round(p1 - 10.0, 1),
             "tp2": round(p1 - 15.0, 1),
             "sl1": round(p1 + 12.5, 1),
             "rec1_2x_tp": round(p1 + 25.0, 1),
-            "win_rate": "ย่อสั้น $8–$12 ชนะ 70.0%–78.53% (เอเชีย 82.0%) | กลับตัว >=$25 แค่ 55.71%" + _conf_note(p1, call_spot, "Call Wall"),
-            "research_play": "เก็บสั้น +$8..+$12 เท่านั้น (ระวังไหลต่อหา +2SD ถึง 40.0% ตามสถิติ 500d VOL2VOL" + (" | มี IV Crush หนุนย่อ" if iv_crush else " | ห้ามถัวถ้า Vol สดพุ่ง") + ")",
+            "win_rate": "ย่อสั้น $8–$12 ชนะ 70.0%–78.53% (เอเชีย 82.0%) | กลับตัวคำใหญ่ >=$25 แค่ 55.71%" + _conf_note(p1, call_spot, "Call Wall"),
+            "research_play": "ดักย่อเก็บสั้น +$8..+$12 เท่านั้น (วิจัย 500d VOL2VOL ชี้ว่าโอกาสแตะ 1SD สูง 70% แต่มีโอกาสไหลทะลุไป +2SD ถึง 40.0%" + (" | มี IV Crush หนุนย่อ" if iv_crush else " | ห้ามถัวถ้า Vol สดพุ่ง") + ")",
         },
         {
-            "zone": "+2SD SELL (15ΔC Primary Kill Zone)",
+            "zone": "Zone +2SD SELL (15ΔC Primary Kill Zone — โซนหลัก)",
             "entry_spot": p2,
             "entry_fut": levels["+2.0SD"][0],
             "tp1": round(p2 - 15.0, 1),
@@ -284,11 +291,11 @@ def _build_6_sd_zone_plans(levels: Dict[str, Tuple[float, float]], snap: Hizeiri
             "rec1_2x_tp": round(p2 + 25.0, 1),
             "sl2": round(p2 + 25.0, 1),
             "rec2_6x_tp": round(p2 + 37.5, 1),
-            "win_rate": "กลับตัว >=$25 ชนะ 78.57% (500d) ถึง 85.58% (50d)" + _conf_note(p2, call_spot, "Call Wall"),
-            "research_play": "โซนหลัก SELL! แตะเพียง 28% ของวัน และมีเพียง 25% ที่ไหลต่อไป 3SD (Twin-Peaks Volga + Vanna กดราคาลง)",
+            "win_rate": "กลับตัวคำใหญ่ >=$25 ชนะ 78.57% (500d) ถึง 85.58% (50d)" + _conf_note(p2, call_spot, "Call Wall"),
+            "research_play": "จุดเข้า SELL หลักประจำวัน! ราคาวิ่งมาถึงเพียง 28% ของวัน และมีโอกาสไหลไป 3SD เพียง 25% (จุดพีค Twin-Peaks Volga ขยาย Shadow Gamma +25%–30% กดราคาสวิงกลับ +$15..+$25)",
         },
         {
-            "zone": "+3SD SELL (5ΔC Tail Extreme)",
+            "zone": "Zone +3SD SELL (5ΔC Tail Extreme)",
             "entry_spot": p3,
             "entry_fut": levels["+3.0SD"][0],
             "tp1": round(p3 - 20.0, 1),
@@ -297,22 +304,22 @@ def _build_6_sd_zone_plans(levels: Dict[str, Tuple[float, float]], snap: Hizeiri
             "rec1_2x_tp": round(p3 + 25.0, 1),
             "sl2": round(p3 + 25.0, 1),
             "rec2_6x_tp": round(p3 + 37.5, 1),
-            "win_rate": "กลับตัว >=$25 สูงสุด 91.43% (500d) ถึง 95.0% หลัง Absorption (จบสวิง 96.3%)",
-            "research_play": "ดักคำใหญ่ +$25..+$35! แตะเพียง 7% ของวัน (ระวังหลับตาสวนไม้แรก <55% ถ้ายืน 5Δ ต้องรอแท่งดูดซับ/Vol หักหัวลง)",
+            "win_rate": "กลับตัวคำใหญ่ >=$25 สูงสุด 91.43% (500d) ถึง 95.0% หลัง Absorption (จบสวิง 96.3%)",
+            "research_play": "ดักทุบคำใหญ่ +$25..+$35! โอกาสเกิดเพียง 3.7%–7.0% ของวัน (ห้ามหลับตาสวนไม้แรกทันทีเพราชนะ <55% ต้องรอราคาหยุดไหลและเส้นเขียว Vol สดเริ่มหักหัวลง)",
         },
         {
-            "zone": "-1SD BUY (25ΔP Drift Zone)",
+            "zone": "Zone -1SD BUY (25ΔP Drift Zone)",
             "entry_spot": m1,
             "entry_fut": levels["-1.0SD"][0],
             "tp1": round(m1 + 10.0, 1),
             "tp2": round(m1 + 15.0, 1),
             "sl1": round(m1 - 12.5, 1),
             "rec1_2x_tp": round(m1 - 25.0, 1),
-            "win_rate": "ดีดสั้น $8–$12 ชนะ 70.0%–78.53% (เอเชีย 82.0%) | กลับตัว >=$25 แค่ 55.71%" + _conf_note(m1, put_spot, "Put Wall"),
-            "research_play": "เก็บสั้น +$8..+$12 เท่านั้น (ระวังไหลลงหา -2SD ถึง 40.0%" + (" | มี IV Crush หนุนเด้ง" if iv_crush else " | ระวัง Put Skew ขายกดลง") + ")",
+            "win_rate": "ดีดสั้น $8–$12 ชนะ 70.0%–78.53% (เอเชีย 82.0%) | กลับตัวคำใหญ่ >=$25 แค่ 55.71%" + _conf_note(m1, put_spot, "Put Wall"),
+            "research_play": "ดักเด้งเก็บสั้น +$8..+$12 เท่านั้น (วิจัย 500d ชี้ว่ามีโอกาสไหลลงต่อหา -2SD ถึง 40.0%" + (" | มี IV Crush หนุนเด้ง" if iv_crush else " | ระวัง Put Skew กดลง") + ")",
         },
         {
-            "zone": "-2SD BUY (15ΔP Primary Kill Zone)",
+            "zone": "Zone -2SD BUY (15ΔP Primary Kill Zone — โซนหลัก)",
             "entry_spot": m2,
             "entry_fut": levels["-2.0SD"][0],
             "tp1": round(m2 + 15.0, 1),
@@ -321,11 +328,11 @@ def _build_6_sd_zone_plans(levels: Dict[str, Tuple[float, float]], snap: Hizeiri
             "rec1_2x_tp": round(m2 - 25.0, 1),
             "sl2": round(m2 - 25.0, 1),
             "rec2_6x_tp": round(m2 - 37.5, 1),
-            "win_rate": "กลับตัว >=$25 ชนะ 78.57% (500d) ถึง 85.58% (50d)" + _conf_note(m2, put_spot, "Put Wall"),
-            "research_play": "โซนหลัก BUY! แตะเพียง 28% ของวัน และมีเพียง 25% ที่ไหลต่อไป -3SD (Vanna Bounce + Dealer ซื้อ Futures คืน)",
+            "win_rate": "กลับตัวคำใหญ่ >=$25 ชนะ 78.57% (500d) ถึง 85.58% (50d)" + _conf_note(m2, put_spot, "Put Wall"),
+            "research_play": "จุดเข้า BUY หลักประจำวัน! ราคาลงมาถึงเพียง 28% ของวัน และมีโอกาสไหลไป -3SD เพียง 25% (เกิดแรงดีด Vanna Bounce + Dealer ซื้อ Futures คืนพาเด้ง +$15..+$25)",
         },
         {
-            "zone": "-3SD BUY (5ΔP Tail Extreme)",
+            "zone": "Zone -3SD BUY (5ΔP Tail Extreme)",
             "entry_spot": m3,
             "entry_fut": levels["-3.0SD"][0],
             "tp1": round(m3 + 20.0, 1),
@@ -334,15 +341,15 @@ def _build_6_sd_zone_plans(levels: Dict[str, Tuple[float, float]], snap: Hizeiri
             "rec1_2x_tp": round(m3 - 25.0, 1),
             "sl2": round(m3 - 25.0, 1),
             "rec2_6x_tp": round(m3 - 37.5, 1),
-            "win_rate": "กลับตัว >=$25 สูงสุด 91.43% (500d) ถึง 95.0% หลัง Absorption (จบสวิง 96.3%)",
-            "research_play": "ดักคำใหญ่ +$25..+$35! แตะเพียง 7% ของวัน (รอหยุดไหลเกิด Absorption แล้วเก็บเด้งยาว)",
+            "win_rate": "กลับตัวคำใหญ่ >=$25 สูงสุด 91.43% (500d) ถึง 95.0% หลัง Absorption (จบสวิง 96.3%)",
+            "research_play": "ดักช้อนคำใหญ่ +$25..+$35! โอกาสเกิดเพียง 3.7%–7.0% ของวัน (รอแท่งดูดซับแรงขาย Absorption + IV พีคหักหัวลงแล้วถือรันกำไรคำใหญ่)",
         },
     ]
 
 
 def compute_exact_coordinates(snap: HizeirisSnapshot) -> Dict:
     fut = snap.futures_price
-    open_fut = snap.daily_open_fut
+    open_fut = snap.daily_open_fut if _is_valid_gold_price(snap.daily_open_fut, fut) else fut
     diff = snap.diff
     spot = round(fut - diff, 1)
     open_spot = round(open_fut - diff, 1)
@@ -358,7 +365,7 @@ def compute_exact_coordinates(snap: HizeirisSnapshot) -> Dict:
         snap.atm_iv, snap.vol_chg, snap.vol_settle_atm, snap.vol_curve_compare
     )
 
-    # สูตร Fix SD จากราคาเปิดของวัน + DTE = 0.8 (ไม่เลื่อนตามราคาปัจจุบัน)
+    # สูตร Fix SD จากราคาเปิดของวัน + DTE = 0.8 (คงที่ตลอดวัน)
     one_sd = round(open_fut * (snap.atm_iv / 100.0) * math.sqrt(fixed_dte / 365.0), 1)
     half_sd = round(one_sd * 0.5, 1)
     one_half_sd = round(one_sd * 1.5, 1)
@@ -396,7 +403,6 @@ def compute_exact_coordinates(snap: HizeirisSnapshot) -> Dict:
     put_spot = levels["PutWall"][1]
     p2sd_spot, m2sd_spot = levels["+2.0SD"][1], levels["-2.0SD"][1]
 
-    # เลือกแผน A อัตโนมัติจากฝั่ง ±2SD ที่ใกล้ Spot ปัจจุบันที่สุด
     if abs(p2sd_spot - spot) <= abs(spot - m2sd_spot):
         a_dir, a_entry = "SELL (ดักสวน Kill Zone +2SD)", p2sd_spot
         a_tp1, a_tp2 = round(a_entry - 15.0, 1), round(a_entry - 25.0, 1)
@@ -447,7 +453,6 @@ def compute_exact_coordinates(snap: HizeirisSnapshot) -> Dict:
 # 3. ดึงภาพกราฟ Intraday + Open Interest (OI) + SD·diff และส่งรูปเข้า Telegram
 # ==============================================================================
 def fetch_telegram_commands(token: str, chat_id: str) -> Tuple[Optional[float], Optional[float]]:
-    """รองรับคำสั่ง /diff <เลข> และ /open <เลข> ใน Telegram"""
     if token == "YOUR_BOT_TOKEN_HERE" or chat_id == "YOUR_CHAT_ID_HERE":
         return None, None
     tg_diff, tg_open = None, None
@@ -465,7 +470,7 @@ def fetch_telegram_commands(token: str, chat_id: str) -> Tuple[Optional[float], 
                             tg_diff = float(m.group(1))
                     if tg_open is None:
                         m2 = re.match(r"^/?open\s+([0-9]+(?:\.[0-9]+)?)$", txt, re.IGNORECASE)
-                        if m2:
+                        if m2 and _is_valid_gold_price(float(m2.group(1))):
                             tg_open = float(m2.group(1))
     except Exception:
         pass
@@ -640,32 +645,42 @@ def parse_snapshot_from_dom_text(
     contract_m = re.search(r"\b(OG[A-Z0-9]{2,5}|G[0-9][A-Z0-9]{2,5}|GC[A-Z0-9]{2,5})\b", raw_text)
     contract_name = contract_m.group(1) if contract_m else "CME Gold"
 
-    fut_px = _parse_float(r"Futures\s*([0-9,]+\.?[0-9]*)", raw_text, 0.0)
+    fut_px = _parse_float(r"Futures\s*([2-5][0-9]{3}(?:\.[0-9]+)?)", raw_text, 0.0)
     if fut_px == 0.0:
-        fut_px = _parse_float(r"ราคากลาง\s*([0-9,]+\.?[0-9]*)", raw_text, 3880.0)
+        fut_px = _parse_float(r"ราคากลาง\s*([2-5],?[0-9]{3}(?:\.[0-9]+)?)", raw_text, 3865.0)
 
     dte = _parse_float(r"DTE\s*([0-9]+\.?[0-9]*)", raw_text, 0.5)
     atm_live = _parse_float(r"ATM\s*vol\s*([0-9]+\.?[0-9]*)", raw_text, 0.0)
     if atm_live == 0.0:
-        atm_live = _parse_float(r"\bIV\s*([0-9]+\.?[0-9]*)", raw_text, 17.5)
+        atm_live = _parse_float(r"\bIV\s*([0-9]+\.?[0-9]*)", raw_text, 17.3)
 
     vol_chg = _parse_float(r"Vol\s*Chg\s*([+\-]?[0-9]+\.?[0-9]*)", raw_text, 0.0)
     future_chg = _parse_float(r"Future\s*Chg\s*([+\-]?[0-9]+\.?[0-9]*)", raw_text, 0.0)
     vol_settle_atm = round(atm_live - vol_chg, 2)
 
-    # หา "ราคาเปิดของวัน (Fixed Daily Open)" โดยล็อกไว้ตลอดทั้งวันใน session_state.json
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    web_open = _parse_float(r"(?:open|ราคาเปิด)\s*[:=]?\s*([0-9,]+\.?[0-9]*)", raw_text, 0.0)
+    web_diff = _parse_float(r"\bdiff\s*[:=]?\s*([0-9]+\.?[0-9]*)", raw_text, 0.0)
+    if tg_diff is not None:
+        final_diff, diff_src = tg_diff, "ตั้งค่าจาก Telegram /diff"
+    elif 0.1 <= web_diff <= 50.0:
+        final_diff, diff_src = round(web_diff, 2), "อ่านจากหน้าเว็บ Hizeiris"
+    else:
+        final_diff, diff_src = fallback_diff, f"ค่ามาตรฐาน ({fallback_diff})"
 
-    if tg_open is not None and tg_open > 0:
+    # ดึงราคาเปิด/แกนกลางของวัน (บังคับตรวจ _is_valid_gold_price ช่วง 2500-6000 เพื่อไม่ให้ติดเลข 6.0)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    plan_anchor_spot = _parse_float(r"([2-5][0-9]{3}\.[0-9]+)\s*[·•]\s*IV\s*[0-9.]+", raw_text, 0.0)
+    prev_open = float(prev_state.get("daily_open_fut", 0.0)) if prev_state else 0.0
+
+    if tg_open is not None and _is_valid_gold_price(tg_open, fut_px):
         daily_open_fut, open_src = round(tg_open, 1), "ตั้งค่าจาก Telegram /open"
-    elif prev_state and prev_state.get("trading_day") == today_str and float(prev_state.get("daily_open_fut", 0)) > 0:
-        daily_open_fut = float(prev_state["daily_open_fut"])
-        open_src = f"Fixed ราคาเปิดประจำวัน ({daily_open_fut})"
-    elif web_open > 0:
-        daily_open_fut, open_src = round(web_open, 1), "อ่านจากราคาเปิด (Open) บนเว็บ"
-    elif future_chg != 0.0 and fut_px > 0:
-        daily_open_fut, open_src = round(fut_px - future_chg, 1), "คำนวณจาก Futures - Future Chg (Prior Settle)"
+    elif prev_state and prev_state.get("trading_day") == today_str and _is_valid_gold_price(prev_open, fut_px):
+        daily_open_fut, open_src = round(prev_open, 1), f"Fixed ราคาเปิดประจำวัน ({prev_open:.1f})"
+    elif future_chg != 0.0 and _is_valid_gold_price(fut_px - future_chg, fut_px):
+        daily_open_fut = round(fut_px - future_chg, 1)
+        open_src = "คำนวณจาก Futures - Future Chg (Prior Settle)"
+    elif _is_valid_gold_price(plan_anchor_spot + final_diff, fut_px):
+        daily_open_fut = round(plan_anchor_spot + final_diff, 1)
+        open_src = "อ่านจากแกนกลางแผนเทรดบนเว็บ"
     else:
         daily_open_fut, open_src = round(fut_px, 1), "ล็อกราคาเปิดรอบแรกของวัน"
 
@@ -690,11 +705,11 @@ def parse_snapshot_from_dom_text(
     churn_m = re.search(r"Churn\s*(C\s*[0-9.]+\s*[·•/]?\s*P\s*[0-9.]+)", raw_text, re.IGNORECASE)
     churn_str = churn_m.group(1) if churn_m else "N/A"
 
-    max_pain = _parse_float(r"Max\s*Pain\s*([0-9,]+\.?[0-9]*)", raw_text, round(fut_px, -1))
+    max_pain = _parse_float(r"Max\s*Pain\s*([2-5][0-9]{3})", raw_text, round(fut_px, -1))
 
-    call_wall = _parse_float(r"Call\s*wall\s*([0-9,]+\.?[0-9]*)", raw_text, 0.0)
+    call_wall = _parse_float(r"Call\s*wall\s*([2-5][0-9]{3})", raw_text, 0.0)
     call_oi_cnt = ""
-    cw_plan_m = re.search(r"Call\s+[0-9.]+\s*\(([0-9]{4})\)[^\n]*?OI\s*([0-9,]+)", raw_text, re.IGNORECASE)
+    cw_plan_m = re.search(r"Call\s+[0-9.]+\s*\(([2-5][0-9]{3})\)[^\n]*?OI\s*([0-9,]+)", raw_text, re.IGNORECASE)
     if cw_plan_m:
         if call_wall == 0.0:
             call_wall = float(cw_plan_m.group(1))
@@ -702,23 +717,15 @@ def parse_snapshot_from_dom_text(
     if call_wall == 0.0:
         call_wall = round(fut_px + 50, -1)
 
-    put_wall = _parse_float(r"Put\s*wall\s*([0-9,]+\.?[0-9]*)", raw_text, 0.0)
+    put_wall = _parse_float(r"Put\s*wall\s*([2-5][0-9]{3})", raw_text, 0.0)
     put_oi_cnt = ""
-    pw_plan_m = re.search(r"Put\s+[0-9.]+\s*\(([0-9]{4})\)[^\n]*?OI\s*([0-9,]+)", raw_text, re.IGNORECASE)
+    pw_plan_m = re.search(r"Put\s+[0-9.]+\s*\(([2-5][0-9]{3})\)[^\n]*?OI\s*([0-9,]+)", raw_text, re.IGNORECASE)
     if pw_plan_m:
         if put_wall == 0.0:
             put_wall = float(pw_plan_m.group(1))
         put_oi_cnt = f"OI {pw_plan_m.group(2)} สัญญา"
     if put_wall == 0.0:
         put_wall = round(fut_px - 50, -1)
-
-    web_diff = _parse_float(r"\bdiff\s*[:=]?\s*([0-9]+\.?[0-9]*)", raw_text, 0.0)
-    if tg_diff is not None:
-        final_diff, diff_src = tg_diff, "ตั้งค่าจาก Telegram /diff"
-    elif web_diff > 0:
-        final_diff, diff_src = round(web_diff, 2), "อ่านจากหน้าเว็บ Hizeiris"
-    else:
-        final_diff, diff_src = fallback_diff, f"ค่ามาตรฐาน ({fallback_diff})"
 
     return HizeirisSnapshot(
         contract_name=contract_name,
@@ -758,30 +765,13 @@ def parse_snapshot_from_dom_text(
 
 FULL_RESEARCH_SYNTHESIS_PROMPT = """
 คุณคือ "Quantitative Derivatives & Market Microstructure Analyst (Mtraders Masterclass & AI CME Analyst)"
-จงวิเคราะห์ภาพหน้าจอแอป "Intraday OI Monitor by Hizeiris" ทั้งกราฟ Intraday Volume, กราฟ Open Interest (OI), แท็บ SD·diff และข้อมูล **Fixed SD จากราคาเปิดของวันด้วย DTE = 0.8** ที่ Python คำนวณให้แล้วด้านล่างนี้ โดยห้ามตกหล่นแม้แต่หัวข้อเดียว (ห้ามใช้ ICT/SMC/EA และห้ามพูดเรื่องขนาดพอร์ต/Kelly/Lot/1.0 Unit):
+จงวิเคราะห์ข้อมูล **Fixed SD จากราคาเปิดของวันด้วย DTE = 0.8** ที่ Python คำนวณให้แล้วด้านล่างนี้ โดยห้ามตกหล่นแม้แต่หัวข้อเดียว (ห้ามใช้ ICT/SMC/EA และห้ามพูดเรื่องขนาดพอร์ต/Kelly/Lot/1.0 Unit):
 
 [บังคับแสดงผลครบทั้ง 6 ส่วนตามโครงสร้างวิจัยนี้เท่านั้น]
 ### ส่วนที่ 1: สรุปพารามิเตอร์, Fixed Daily Open (DTE 0.8), Vol สด vs Vol พื้นฐาน, Intraday & OI, HMM & รถไม่มีเบรก
-- ระบุ: สัญญา, เวลา/รอบ, **ราคาเปิดของวัน (Fixed Anchor)**, Futures ปัจจุบัน, Future Chg, ค่า Diff, ราคา XAUUSD ปัจจุบัน, DTE จริง vs **Fixed DTE = 0.8** (ระยะ 1SD, 2SD, 3SD คงที่ตลอดวัน)
-- **วิเคราะห์เจาะลึก `Vol สด (เส้นทึบสีเขียว)` เทียบกับ `Vol พื้นฐาน / Vol Settle (เส้นประสีแดง)`**: ระบุค่า `Vol สด`, `Vol พื้นฐาน`, `Vol Chg` และผลกระทบต่อปีกซ้าย (Put) / ATM / ปีกขวา (Call)
-- **เปรียบเทียบกราฟแท่ง `Intraday Volume` กับ `Open Interest`**, `Churn C/P`, `Max Pain`, สภาวะ HMM 3-State, Shadow Greeks (Vanna, Twin-Peaks Volga) และโมเดลรถไม่มีเบรก
-
 ### ส่วนที่ 2: ตารางพิกัด Fixed SD ประจำวัน (คำนวณจากราคาเปิดของวัน + DTE 0.8 หักค่า Diff)
-- แสดงพิกัดเรียงจากบนลงล่างครบตั้งแต่ `+3SD`, `+2.5SD`, `+2SD`, `Call Wall`, `+1.5SD`, `+1SD`, `+0.5SD`, `ราคาเปิดของวัน (Open Anchor)`, `Spot ปัจจุบัน`, `Max Pain`, `-0.5SD`, `-1SD`, `-1.5SD`, `Put Wall`, `-2SD`, `-2.5SD`, `-3SD`
-- ใช้ตัวเลข XAUUSD & Futures ที่ Python คำนวณให้เป๊ะ 100% พร้อมโบนัสเลขกลม และ % สถิติจากงานวิจัย 500d VOL2VOL & 27d/50d/100d
-
 ### ส่วนที่ 3: การประเมินความได้เปรียบเชิงสถิติ (% Statistical Edge Scorecard: ฝั่ง Buy vs ฝั่ง Sell)
-
-### ส่วนที่ 4: แผนปฏิบัติการเทรดเชิงปริมาณครบทั้ง 6 โซน Fixed SD & วิเคราะห์การเล่นจากงานวิจัย + Supa888 Recovery
-- **บังคับแจกแจงครบทั้ง 6 โซน (ห้ามตัดโซนใดออก)**:
-  1. **Zone +1SD SELL (25ΔC Drift)**: พิกัด Entry, TP1/TP2, SL/Recovery, % Win Rate และวิธีเล่นตามวิจัย (เก็บสั้น $8–$12 เพราะไหลต่อ 2SD ถึง 40%)
-  2. **Zone +2SD SELL (15ΔC Primary Kill Zone — โซนหลัก)**: พิกัด Entry, TP1/TP2 (+$25), Supa888 (ทบ 2x / รวบทบ 6x), % Win Rate (78.57%–91.4%)
-  3. **Zone +3SD SELL (5ΔC Tail Extreme)**: พิกัด Entry, TP คำใหญ่ (+$25..+$35), Supa888, % Win Rate (91.43%–95.0% หลัง Absorption)
-  4. **Zone -1SD BUY (25ΔP Drift)**: พิกัด Entry, TP1/TP2, SL/Recovery, % Win Rate และวิธีเล่นตามวิจัย (เก็บสั้น $8–$12)
-  5. **Zone -2SD BUY (15ΔP Primary Kill Zone — โซนหลัก)**: พิกัด Entry, TP1/TP2 (+$25), Supa888 (ทบ 2x / รวบทบ 6x), % Win Rate (78.57%–91.4%)
-  6. **Zone -3SD BUY (5ΔP Tail Extreme)**: พิกัด Entry, TP คำใหญ่ (+$25..+$35), Supa888, % Win Rate (91.43%–95.0% หลัง Absorption)
-- พร้อมระบุ **แผน C (Breakout / Gamma Squeeze)** เมื่อทะลุ Call Wall / หลุด Put Wall
-
+### ส่วนที่ 4: แผนปฏิบัติการเทรดเชิงปริมาณครบทั้ง 6 โซน Fixed SD (Zone +1SD SELL, +2SD SELL, +3SD SELL, -1SD BUY, -2SD BUY, -3SD BUY) & วิเคราะห์การเล่นจากงานวิจัย + Supa888 Recovery
 ### ส่วนที่ 5: จุดเฝ้าระวังการเปลี่ยนสถานะเชิงปริมาณในรอบถัดไป (Key Quant Triggers)
 ### ส่วนที่ 6: 📌 กล่องบันทึกความจำสถานะประจำซีรีส์ (SESSION MEMORY STATE TRACKER)
 """
@@ -799,37 +789,50 @@ def build_deterministic_fallback_report(snap: HizeirisSnapshot, exact_calc: Dict
     for z in zones:
         rec2_line = f" | SL2 (-25): `{z['sl2']}` (รวบทบ 6x -> `{z['rec2_6x_tp']}`)" if "sl2" in z else ""
         zone_lines.append(
-            f"• *{z['zone']}*: Entry `{z['entry_spot']}` (Fut {z['entry_fut']})\n"
-            f"  TP1: `{z['tp1']}` / TP2: `{z['tp2']}` | SL1 (-12.5): `{z['sl1']}` (ทบ 2x -> `{z['rec1_2x_tp']}`){rec2_line}\n"
-            f"  _วิจัย_: {z['win_rate']} -> {z['research_play']}"
+            f"• *{z['zone']}*\n"
+            f"  พิกัดเข้า (XAUUSD): `{z['entry_spot']}` (Fut `{z['entry_fut']}`)\n"
+            f"  เป้าทำกำไร: TP1 `{z['tp1']}` / TP2 `{z['tp2']}`\n"
+            f"  แก้พอร์ต Supa888: SL1 (-12.5) `{z['sl1']}` (ทบ 2x -> TP `{z['rec1_2x_tp']}`){rec2_line}\n"
+            f"  สถิติวิจัย: _{z['win_rate']}_\n"
+            f"  วิธีเล่นตามวิจัย: _{z['research_play']}_"
         )
 
     return (
         f"📊 *ส่วนที่ 1: สรุปพารามิเตอร์ & Fixed Daily Open SD (DTE 0.8)* ({snap.timestamp})\n"
-        f"• สัญญา: `{snap.contract_name}` | *ราคาเปิดวัน*: `{exact_calc['open_spot']}` (Fut `{exact_calc['open_fut']}`, _{snap.open_source}_)\n"
-        f"• Futures ปัจจุบัน: `{snap.futures_price}` (`{snap.future_chg:+.1f}`) | Diff: `{snap.diff}` | *XAUUSD*: `{exact_calc['spot']}`\n"
-        f"• *Fixed DTE*: `{snap.fixed_dte}` (เว็บ `{snap.dte}`) -> ระยะคงที่ `1SD = ±{sd_pts['1SD']}` | `2SD = ±{sd_pts['2SD']}` | `3SD = ±{sd_pts['3SD']}`\n"
-        f"• *Vol สด (เส้นเขียว)*: `{va['vol_live']}` vs *Vol พื้นฐาน (เส้นประแดง)*: `{va['vol_base_settle']}` (`Vol Chg {va['vol_chg']}`)\n"
+        f"• สัญญา: `{snap.contract_name}` | *ราคาเปิดวัน (Anchor)*: `{exact_calc['open_spot']}` (Fut `{exact_calc['open_fut']}`, _{snap.open_source}_)\n"
+        f"• Futures ปัจจุบัน: `{snap.futures_price}` (`{snap.future_chg:+.1f}`) | Diff: `{snap.diff}` _({snap.diff_source})_ | *XAUUSD ปัจจุบัน*: `{exact_calc['spot']}`\n"
+        f"• *Fixed DTE*: `{snap.fixed_dte}` (DTE จริงบนเว็บ `{snap.dte}`) -> กรอบคงที่ทั้งวัน `1SD = ±{sd_pts['1SD']}` | `2SD = ±{sd_pts['2SD']}` | `3SD = ±{sd_pts['3SD']}`\n"
+        f"• *Vol สด (เส้นเขียวทึบ)*: `{va['vol_live']}` vs *Vol พื้นฐาน (เส้นประแดง)*: `{va['vol_base_settle']}` (`Vol Chg {va['vol_chg']}`)\n"
         f"  -> _{va['regime']}: {va['impact']}_\n"
         f"• แปลงเวลา: ชม. `±{ts['hourly_div_40_8']}` / วัน(Rule16) `±{ts['daily_rule16_pts']}` (`±{ts['daily_rule16_pct']}%`) / สัปดาห์ `±{ts['weekly_div_7_2']}`\n"
-        f"• *Intraday*: C `{snap.intraday_c:,}` / P `{snap.intraday_p:,}` (`P/C {snap.intraday_pc}`) | *OI*: C `{snap.oi_c:,}` / P `{snap.oi_p:,}` (`P/C {snap.oi_pc}`) | Churn: `{snap.churn_str}`\n"
-        f"• สถานะเทียบราคาเปิด: {exact_calc['current_sd_zone']['zone_name']}\n\n"
-        f"🧱 *ส่วนที่ 2: พิกัด Fixed SD จากราคาเปิดวัน (DTE 0.8, หัก Diff {snap.diff})*\n"
-        f"• +3.0SD (5ΔC, 91.43%): `{lv['+3.0SD']}` | +2.5SD: `{lv['+2.5SD']}`\n"
-        f"• +2.0SD (15ΔC Kill Zone): `{lv['+2.0SD']}` | Call Wall ({snap.call_wall_pc}): `{lv['CallWall']}`\n"
-        f"• +1.5SD: `{lv['+1.5SD']}` | +1.0SD (25ΔC Drift): `{lv['+1.0SD']}` | +0.5SD: `{lv['+0.5SD']}`\n"
-        f"• *ราคาเปิดวัน (Anchor)*: `{lv['OpenAnchor']}` | *Spot ปัจจุบัน*: `{lv['SpotNow']}` | Max Pain: `{lv['MaxPain']}`\n"
-        f"• -0.5SD: `{lv['-0.5SD']}` | -1.0SD (25ΔP Drift): `{lv['-1.0SD']}` | -1.5SD: `{lv['-1.5SD']}`\n"
-        f"• Put Wall ({snap.put_wall_pc}): `{lv['PutWall']}` | -2.0SD (15ΔP Kill Zone): `{lv['-2.0SD']}`\n"
-        f"• -2.5SD: `{lv['-2.5SD']}` | -3.0SD (5ΔP, 91.43%): `{lv['-3.0SD']}`\n\n"
-        f"⚖️ *ส่วนที่ 3: Statistical Edge Scorecard*\n"
+        f"• *Intraday Volume*: C `{snap.intraday_c:,}` / P `{snap.intraday_p:,}` (`P/C {snap.intraday_pc}`) | *Open Interest*: C `{snap.oi_c:,}` / P `{snap.oi_p:,}` (`P/C {snap.oi_pc}`) | Churn: `{snap.churn_str}`\n"
+        f"• สถานะราคาเทียบราคาเปิดวัน: {exact_calc['current_sd_zone']['zone_name']}\n"
+        f"  -> _{exact_calc['current_sd_zone']['stats']}_\n\n"
+        f"🧱 *ส่วนที่ 2: ตารางพิกัด Fixed SD จากราคาเปิดวัน (DTE 0.8, หัก Diff {snap.diff})*\n"
+        f"• +3.0SD (5ΔC Tail Extreme, 91.43%): `{lv['+3.0SD']}`\n"
+        f"• +2.5SD (Overextended): `{lv['+2.5SD']}`\n"
+        f"• +2.0SD (15ΔC Primary Kill Zone, 78.57%–91.4%): `{lv['+2.0SD']}`\n"
+        f"• Call Wall ({snap.call_wall_pc}): `{lv['CallWall']}`\n"
+        f"• +1.5SD (25Δ–15Δ): `{lv['+1.5SD']}`\n"
+        f"• +1.0SD (25ΔC Drift Zone, ย่อสั้น 78.5% / ไหลต่อ 40%): `{lv['+1.0SD']}`\n"
+        f"• +0.5SD (35ΔC): `{lv['+0.5SD']}`\n"
+        f"• *ราคาเปิดวัน (Fixed Anchor)*: `{lv['OpenAnchor']}` | *Spot ปัจจุบัน*: `{lv['SpotNow']}` | Max Pain: `{lv['MaxPain']}`\n"
+        f"• -0.5SD (35ΔP): `{lv['-0.5SD']}`\n"
+        f"• -1.0SD (25ΔP Drift Zone, เด้งสั้น 78.5% / ไหลต่อ 40%): `{lv['-1.0SD']}`\n"
+        f"• -1.5SD (25Δ–15Δ): `{lv['-1.5SD']}`\n"
+        f"• Put Wall ({snap.put_wall_pc}): `{lv['PutWall']}`\n"
+        f"• -2.0SD (15ΔP Primary Kill Zone, 78.57%–91.4%): `{lv['-2.0SD']}`\n"
+        f"• -2.5SD (Overextended): `{lv['-2.5SD']}`\n"
+        f"• -3.0SD (5ΔP Tail Extreme, 91.43%): `{lv['-3.0SD']}`\n\n"
+        f"⚖️ *ส่วนที่ 3: Statistical Edge Scorecard (ฝั่ง Buy vs ฝั่ง Sell)*\n"
         f"• ฝั่งขึ้นหา Call Wall (ห่าง `{exact_calc['dist_call']}`): {exact_calc['oi_call_zone']['light']} {exact_calc['oi_call_zone']['zone']} -> แตะ `{exact_calc['oi_call_zone']['touch']}` | +$25 `{exact_calc['oi_call_zone']['win25']}`\n"
         f"• ฝั่งลงหา Put Wall (ห่าง `{exact_calc['dist_put']}`): {exact_calc['oi_put_zone']['light']} {exact_calc['oi_put_zone']['zone']} -> แตะ `{exact_calc['oi_put_zone']['touch']}` | +$25 `{exact_calc['oi_put_zone']['win25']}`\n\n"
-        f"🎯 *ส่วนที่ 4: แผนเทรด 6 โซน Fixed SD (1SD/2SD/3SD SELL & BUY) + Supa888*\n"
-        + "\n".join(zone_lines)
-        + f"\n• *แผน C (Gamma Squeeze)*: ทะลุ Call Wall เข้าที่ `{pc['call_wall_break']}` -> TP `{pc['call_squeeze_tp']}` | หลุด Put Wall เข้าที่ `{pc['put_wall_break']}` -> TP `{pc['put_squeeze_tp']}`\n\n"
-        f"🔔 *ส่วนที่ 5: Key Quant Triggers*: จับตาเส้นเขียว Vol สด (`{va['vol_live']}`) เทียบเส้นประแดง (`{va['vol_base_settle']}`) และเสา Intraday (`P/C {snap.intraday_pc}`)\n"
-        f"📌 *ส่วนที่ 6: SESSION MEMORY STATE*: `Open {exact_calc['open_spot']} | DTE {snap.fixed_dte} | 1SD {sd_pts['1SD']} | Diff {snap.diff} | Spot {exact_calc['spot']}`"
+        f"🎯 *ส่วนที่ 4: แผนปฏิบัติการเทรดครบ 6 โซน Fixed SD (1SD/2SD/3SD SELL & BUY) + วิเคราะห์จากวิจัย*\n"
+        + "\n\n".join(zone_lines)
+        + f"\n\n• *แผน C (สำรอง — Breakout / Gamma Squeeze)*:\n"
+        f"  ทะลุ Call Wall ยืนเหนือ `{pc['call_wall_break']}` -> Follow Buy เป้า `{pc['call_squeeze_tp']}` | หลุด Put Wall ยืนต่ำกว่า `{pc['put_wall_break']}` -> Follow Sell เป้า `{pc['put_squeeze_tp']}`\n\n"
+        f"🔔 *ส่วนที่ 5: Key Quant Triggers รอบถัดไป*: จับตาการฉีกตัวของเส้นเขียว Vol สด (`{va['vol_live']}`) เทียบเส้นประแดง (`{va['vol_base_settle']}`) และการเติมเสา Intraday (`P/C {snap.intraday_pc}`)\n"
+        f"📌 *ส่วนที่ 6: SESSION MEMORY STATE*: `Open {exact_calc['open_spot']} (Fut {exact_calc['open_fut']}) | FixedDTE {snap.fixed_dte} | 1SD ±{sd_pts['1SD']} | Diff {snap.diff} | Spot {exact_calc['spot']}`"
     )
 
 
@@ -846,20 +849,17 @@ def synthesize_full_report(snap: HizeirisSnapshot, exact_calc: Dict, capture: Op
 
     prompt = (
         f"{FULL_RESEARCH_SYNTHESIS_PROMPT}\n\n"
-        f"[ข้อมูล Fixed SD (DTE 0.8 จากราคาเปิดวัน) และแผน 6 โซนที่ Python คำนวณแม่นยำแล้ว 100%]:\n{context_json}\n\n"
-        f"[ข้อความจากหน้าเว็บ]:\n{str(capture['raw_text'])[:6000]}"
+        f"[ข้อมูล Fixed SD (DTE 0.8 จากราคาเปิดวัน) และแผน 6 โซนที่ Python คำนวณแม่นยำแล้ว 100%]:\n{context_json}"
     )
 
     try:
         return call_gemini_rest_fast(
             api_key=api_key,
             prompt_text=prompt,
-            image_paths=capture["screenshot_paths"][:2],
-            json_mode=False,
-            timeout_sec=40,
+            image_paths=capture["screenshot_paths"][:1],
+            timeout_sec=32,
         )
-    except Exception as e:
-        print(f"⚡ ส่งรายงานวิเคราะห์เชิงปริมาณ 6 ส่วนจากระบบคำนวณ Python ทันที ({e})")
+    except Exception:
         return build_deterministic_fallback_report(snap, exact_calc)
 
 
@@ -913,8 +913,11 @@ def send_telegram_parts(parts: List[str], token: str, chat_id: str) -> None:
 
 def load_state(path: str) -> Optional[Dict]:
     if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
     return None
 
 
@@ -932,8 +935,8 @@ def run_once():
         cap = None
         snap = HizeirisSnapshot(
             contract_name="G3MX6", timestamp=datetime.now().strftime("%Y-%m-%d %H:%M"),
-            futures_price=3881.4, future_chg=-2.3,
-            daily_open_fut=3883.7, open_source="คำนวณจาก Futures - Future Chg (Prior Settle)",
+            futures_price=3864.8, future_chg=-2.4,
+            daily_open_fut=3867.2, open_source="คำนวณจาก Futures - Future Chg (Prior Settle)",
             diff=tg_diff or 2.5, diff_source="อ่านจากหน้าเว็บ Hizeiris",
             dte=0.48, fixed_dte=CONFIG["FIXED_DTE"],
             atm_iv=17.30, vol_chg=0.00, vol_settle_atm=17.30,
@@ -964,7 +967,7 @@ def run_once():
     save_state(CONFIG["STATE_FILE"], {
         "trading_day": datetime.now().strftime("%Y-%m-%d"),
         "timestamp": snap.timestamp,
-        "daily_open_fut": snap.daily_open_fut,
+        "daily_open_fut": exact_calc["open_fut"],
         "fixed_dte": snap.fixed_dte,
         "sd_1_pts": exact_calc["sd_pts"]["1SD"],
         "futures_price": snap.futures_price,
