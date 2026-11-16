@@ -1,6 +1,10 @@
 {
   "trading_day": "2026-11-16",
+<<<<<<< Updated upstream
   "timestamp": "2026-11-16 23:30",
+=======
+  "timestamp": "2026-11-16 23:32",
+>>>>>>> Stashed changes
   "round_str": "รอบ 79/79",
   "daily_open_fut": 3883.3,
   "daily_open_spot": 3880.8,
@@ -21,7 +25,7 @@
   "intraday_c": 1524,
   "intraday_p": 1258,
   "put_wall": 3850.0,
-  "call_wall": 3920.0,
+  "call_wall": 3975.0,
   "max_pain": 3970.0,
   "round_history": [
     {
@@ -161,7 +165,11 @@
       "call_wall": 3920.0
     },
     {
+<<<<<<< Updated upstream
       "time": "23:30",
+=======
+      "time": "23:32",
+>>>>>>> Stashed changes
       "round_str": "รอบ 79/79",
       "fut": 3858.3,
       "spot": 3855.8,
@@ -175,7 +183,11 @@
       "oi_c": 446,
       "oi_p": 896,
       "put_wall": 3850.0,
+<<<<<<< Updated upstream
       "call_wall": 3920.0
+=======
+      "call_wall": 3975.0
+>>>>>>> Stashed changes
     }
   ]
 }
