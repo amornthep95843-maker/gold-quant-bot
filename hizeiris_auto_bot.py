@@ -1,17 +1,16 @@
 """
 ================================================================================
-HIZEIRIS AUTO BOT — 100% VALIDATED SINGLE-ENTRY TP/SL & LIVE XAU/USD SPOT CHART
+HIZEIRIS AUTO BOT — 100% SYNCED SPOT CHART PRICE + VALIDATED SINGLE-ENTRY TP/SL
 ================================================================================
-1. แก้ไขระบบคำนวณจุดเข้า–ออก (Entry / TP1 / TP2 / SL ปกติ / แก้พอร์ต Supa888) ใหม่ทั้งหมด:
-   - ห้ามนำ 2 แนวที่ห่างกัน (เช่น Put Wall กับ 1SD BUY หรือ Call Wall/Max Pain กับ 1SD/2SD SELL)
-     มามัดรวมเป็นช่วงราคาเดียวแล้วใช้ TP/SL ตัวเดียว ซึ่งทำให้ TP ไปอยู่ผิดฝั่งของจุดเข้า!
-   - ทุกด่าน (1SD / 2SD / 3SD / กำแพง OI) แยกเป็น "พิกัดจุดเข้าเดียวที่ชัดเจน (Single Exact Entry)"
-   - บังคับตรวจสอบสมการทางคณิตศาสตร์ (Strict Order Invariant Validation) ทุกไม้ 100%:
-     • ฝั่ง BUY: ต้องมี TP2 > TP1 > จุดเข้า BUY > SL ปกติ (-8 จุด) > จุดคัตสลับ SELL (-12.5 จุด) > เป้าขา SELL (-25.0 จุด)
-     • ฝั่ง SELL: ต้องมี TP2 < TP1 < จุดเข้า SELL < SL ปกติ (+8 จุด) < จุดคัตสลับ BUY (+12.5 จุด) < เป้าขา BUY (+25.0 จุด)
-2. แยกกล่อง "⚡ สรุปฟันธงหน้างาน & โพยจุดเข้า–ออก" เป็นข้อความแรกสุดโดยเฉพาะ เพื่อไม่ให้ถูกตัดแบ่งครึ่งกลางออเดอร์
-3. แก้ไขรูปแบบตัวหนาใน Telegram ไม่ให้มีเครื่องหมาย ** โผล่รกตา และจัดเรียงผังบันไดราคาใน
-   "[ภาพที่ 4] กราฟราคา Spot XAU/USD ปัจจุบัน" ให้เรียงจากราคาสูงสุดลงมาต่ำสุดตามจริงเสมอ
+1. แก้ปัญหา "ราคาในภาพกราฟ Spot XAU/USD ไม่ตรงกับตัวเลขในข้อความรายงาน":
+   - ดึงราคา Spot XAU/USD สดจาก TradingView (OANDA:XAUUSD API + อ่านค่าปิดจริงจาก DOM ของกราฟ TradingView)
+   - อัปเดตตัวเลขบนหัวกราฟ, แถบสีเหลือง "👉 ราคา XAU/USD (Spot) ณ ปัจจุบัน", คำบรรยายใต้ภาพที่ 4
+     และข้อความวิเคราะห์ทั้ง 5 ส่วนใน Telegram ให้ใช้ "ราคา Spot XAU/USD ตัวเดียวกันเป๊ะ 100%"
+   - ดึงราคา Futures ล่าสุดจากช่อง "ล่าสุด XXXX.X" ในแท็บ SD·diff คู่กับราคา Futures ของรอบเก็บ OI
+2. แก้ปัญหาข้อความด้านขวาของ [ภาพที่ 4] ล้นขอบจอ:
+   - ปรับดีไซน์ผังบันไดราคาด้านขวาใหม่ให้กระชับ คมชัด มี flex-shrink: 0 ที่ตัวเลขราคาด้านขวาสุด
+     รับประกันว่าตัวเลขราคาและ TP/SL ไม่ตกขอบแม้แต่ตัวอักษรเดียว
+3. คงระบบตรวจสอบสมการจุดเข้า–ออก (Single Exact Entry: BUY TP > Entry > SL | SELL TP < Entry < SL) ครบ 100%
 ================================================================================
 """
 
@@ -132,6 +131,7 @@ class HizeirisSnapshot:
     timestamp: str
     round_str: str
     futures_price: float
+    latest_gc_fut: Optional[float]
     future_chg: float
     daily_open_fut: float
     daily_open_spot: float
@@ -173,6 +173,32 @@ def _is_valid_gold_price(val: float, ref_fut: float = 0.0) -> bool:
     if ref_fut > 2500.0 and abs(val - ref_fut) > 250.0:
         return False
     return True
+
+
+def fetch_realtime_xauusd_spot(ref_spot: float) -> Optional[float]:
+    """
+    ดึงราคา Spot XAU/USD สดจาก TradingView Scanner API (OANDA:XAUUSD)
+    เพื่อให้ราคาเริ่มต้นตรงกับกราฟ TradingView OANDA:XAUUSD ก่อนแคปภาพ
+    """
+    try:
+        url = "https://scanner.tradingview.com/cfd/scan"
+        payload = {
+            "symbols": {"tickers": ["OANDA:XAUUSD", "FX_IDC:XAUUSD", "FOREXCOM:XAUUSD"]},
+            "columns": ["close"],
+        }
+        resp = requests.post(url, json=payload, timeout=6)
+        if resp.status_code == 200:
+            rows = resp.json().get("data", [])
+            for r in rows:
+                d = r.get("d", [])
+                if d and d[0] is not None:
+                    px = round(float(d[0]), 2)
+                    if _is_valid_gold_price(px, ref_spot):
+                        print(f"📡 ดึงราคา Spot XAU/USD สดจาก TradingView API สำเร็จ: {px:,.2f}")
+                        return px
+    except Exception as e:
+        print(f"ℹ️ ข้าม TradingView Scanner API ({e})")
+    return None
 
 
 def check_round_number_bonus(spot_price: float) -> str:
@@ -296,7 +322,7 @@ def evaluate_vol_regime_m2_2(atm_iv: float, vol_chg: float) -> Dict[str, str]:
 
 
 def evaluate_module4_microstructure(snap: HizeirisSnapshot, spot: float, open_spot: float, one_sd: float) -> Dict[str, str]:
-    price_up = snap.future_chg >= 0
+    price_up = (spot - open_spot) >= 0
     high_activity = (snap.churn_c >= 0.45 or snap.churn_p >= 0.45 or (snap.intraday_c + snap.intraday_p) >= 500)
 
     if price_up and high_activity:
@@ -356,12 +382,12 @@ def evaluate_module4_microstructure(snap: HizeirisSnapshot, spot: float, open_sp
     dist_to_put = round(spot - (snap.put_wall - snap.diff), 2)
     if dist_to_put <= 20.0:
         car_model = (
-            f"รถกำลังไหลลงมาทดสอบปั๊มน้ำมัน/ฐานรับฝั่งล่างใกล้ Put Wall {int(snap.put_wall)} (Spot {snap.put_wall - snap.diff:.2f}, ห่าง {dist_to_put:.1f} จุด) -> "
+            f"รถอยู่ใกล้ฐานรับฝั่งล่าง Put Wall {int(snap.put_wall)} (Spot {snap.put_wall - snap.diff:.2f}, ห่าง {dist_to_put:.1f} จุด) -> "
             "เข้าสู่ 'จังหวะที่ 2–3': หากแรงขายเจาะผ่านกำแพง Put Wall ไม่ได้ รถที่ไม่มีเบรกจะแวะเติมน้ำมัน (สะสม Volume ใหม่) แล้วดีดกลับขึ้นไปหาปั๊มถัดไป"
         )
     elif dist_to_call <= 20.0:
         car_model = (
-            f"รถกำลังไต่ความชันเส้น Vol Settle ขึ้นไปทดสอบปั๊มปลายทาง Call Wall {int(snap.call_wall)} (Spot {snap.call_wall - snap.diff:.2f}, ห่าง {dist_to_call:.1f} จุด) -> "
+            f"รถกำลังไต่ความชันเส้น Vol Settle ขึ้นไปใกล้ปั๊มปลายทาง Call Wall {int(snap.call_wall)} (Spot {snap.call_wall - snap.diff:.2f}, ห่าง {dist_to_call:.1f} จุด) -> "
             "ระวัง 'จังหวะที่ 2 (น้ำมันหมดกลางทาง)': หากแรงซื้อแผ่วก่อนผ่าน Call Wall รถที่ไม่มีเบรกจะไหลถอยหลังกลับลงมาหาเสาปั๊มน้ำมันแรกทันที!"
         )
     else:
@@ -442,7 +468,7 @@ def _build_morning_vs_current_comparison(
     z_from_open = round(delta_px_from_open / max(tb_morning["range_1sd"], 1.0), 2)
     delta_iv_from_open = round(snap.atm_iv - snap.open_iv, 2)
 
-    curr_iv_dte08_1sd = round(snap.futures_price * (snap.atm_iv / 100.0) * math.sqrt(snap.fixed_dte / 365.0), 2)
+    curr_iv_dte08_1sd = round((spot + snap.diff) * (snap.atm_iv / 100.0) * math.sqrt(snap.fixed_dte / 365.0), 2)
     delta_1sd_dte08 = round(curr_iv_dte08_1sd - tb_morning["range_1sd"], 2)
     delta_1sd_dyn = round(cme_dyn["1SD_pts"] - tb_morning["range_1sd"], 2)
 
@@ -535,12 +561,6 @@ def build_verified_order_ticket(
     structural_sl_spot: Optional[float] = None,
     structural_sl_note: str = "",
 ) -> Dict[str, object]:
-    """
-    สร้างใบสั่งเทรดที่มีจุดเข้าอ้างอิงเดียวชัดเจน (Single Exact Entry Price)
-    และตรวจสอบความถูกต้องทางคณิตศาสตร์ 100% เพื่อไม่ให้ TP/SL สลับฝั่งหรือขัดแย้งกันเด็ดขาด:
-      - หากเป็น BUY: TP2 > TP1 > Entry > SL ปกติ > จุดคัตสลับ SELL (-12.5) > เป้าขา SELL (-25.0)
-      - หากเป็น SELL: TP2 < TP1 < Entry < SL ปกติ < จุดคัตสลับ BUY (+12.5) < เป้าขา BUY (+25.0)
-    """
     side_u = side.upper().strip()
     e_spot = round(float(entry_spot), 2)
     e_fut = round(e_spot + float(diff), 2)
@@ -819,11 +839,27 @@ def _build_tactical_tickets_from_spot(
     return {"buy_tickets": buy_tickets, "sell_tickets": sell_tickets}
 
 
-def compute_exact_coordinates(snap: HizeirisSnapshot, prev_state: Optional[Dict]) -> Dict:
-    fut = snap.futures_price
-    open_fut = round(snap.daily_open_fut if _is_valid_gold_price(snap.daily_open_fut, fut) else fut, 2)
+def compute_exact_coordinates(
+    snap: HizeirisSnapshot,
+    prev_state: Optional[Dict],
+    live_spot_override: Optional[float] = None,
+) -> Dict:
+    fut_round = snap.futures_price
+    open_fut = round(snap.daily_open_fut if _is_valid_gold_price(snap.daily_open_fut, fut_round) else fut_round, 2)
     diff = round(snap.diff, 2)
-    spot = round(fut - diff, 2)
+
+    # ใช้ราคา Spot XAU/USD สดจากกราฟ TradingView (ถ้ามี) เพื่อให้ตรงกับ [ภาพที่ 4] 100.00%
+    if live_spot_override is not None and _is_valid_gold_price(live_spot_override, fut_round):
+        spot = round(float(live_spot_override), 2)
+        spot_source = "กราฟสด TradingView (OANDA:XAUUSD)"
+    elif snap.latest_gc_fut is not None and _is_valid_gold_price(snap.latest_gc_fut, fut_round):
+        spot = round(float(snap.latest_gc_fut) - diff, 2)
+        spot_source = f"ราคา Futures ล่าสุดบนแท็บ SD·diff ({snap.latest_gc_fut:,.1f}) - Diff ({diff:.2f})"
+    else:
+        spot = round(fut_round - diff, 2)
+        spot_source = f"ราคา Futures รอบ {snap.round_str} ({fut_round:,.1f}) - Diff ({diff:.2f})"
+
+    implied_live_fut = round(spot + diff, 2)
     open_spot = round(open_fut - diff, 2)
     fixed_dte = snap.fixed_dte
     open_iv = snap.open_iv
@@ -853,17 +889,17 @@ def compute_exact_coordinates(snap: HizeirisSnapshot, prev_state: Optional[Dict]
     if snap.cme_dynamic_sd_table and snap.cme_dynamic_sd_table.get("+1SD", 0) > 0:
         c_sd = snap.cme_dynamic_sd_table
     else:
-        dyn_1sd = round(fut * (snap.atm_iv / 100.0) * math.sqrt(max(snap.dte, 0.05) / 365.0), 1)
+        dyn_1sd = round(fut_round * (snap.atm_iv / 100.0) * math.sqrt(max(snap.dte, 0.05) / 365.0), 1)
         c_sd = {
             "1SD_pts": dyn_1sd,
             "2SD_pts": round(dyn_1sd * 2, 1),
             "3SD_pts": round(dyn_1sd * 3, 1),
-            "-1SD": round(fut - dyn_1sd, 1),
-            "+1SD": round(fut + dyn_1sd, 1),
-            "-2SD": round(fut - dyn_1sd * 2, 1),
-            "+2SD": round(fut + dyn_1sd * 2, 1),
-            "-3SD": round(fut - dyn_1sd * 3, 1),
-            "+3SD": round(fut + dyn_1sd * 3, 1),
+            "-1SD": round(fut_round - dyn_1sd, 1),
+            "+1SD": round(fut_round + dyn_1sd, 1),
+            "-2SD": round(fut_round - dyn_1sd * 2, 1),
+            "+2SD": round(fut_round + dyn_1sd * 2, 1),
+            "-3SD": round(fut_round - dyn_1sd * 3, 1),
+            "+3SD": round(fut_round + dyn_1sd * 3, 1),
         }
 
     cme_dynamic_spot = {
@@ -953,6 +989,8 @@ def compute_exact_coordinates(snap: HizeirisSnapshot, prev_state: Optional[Dict]
 
     return {
         "spot": spot,
+        "spot_source": spot_source,
+        "implied_live_fut": implied_live_fut,
         "open_fut": open_fut,
         "open_spot": open_spot,
         "open_iv": open_iv,
@@ -997,9 +1035,21 @@ def compute_exact_coordinates(snap: HizeirisSnapshot, prev_state: Optional[Dict]
 
 
 # ==============================================================================
-# 3. สร้าง "[ภาพที่ 4] กราฟราคา Spot XAU/USD ปัจจุบัน (TradingView 15m) & ผังพิกัด 6 โซน"
+# 3. สร้าง "[ภาพที่ 4] กราฟราคา Spot XAU/USD ปัจจุบัน & ผังพิกัด 6 โซน" พร้อมดึงราคาปิดจริงจากกราฟ
 # ==============================================================================
-def render_xauusd_spot_chart_and_ladder(snap: HizeirisSnapshot, exact_calc: Dict) -> Optional[Tuple[str, str]]:
+def render_xauusd_spot_chart_and_sync_price(
+    snap: HizeirisSnapshot,
+    prev_state: Optional[Dict],
+    initial_live_spot: Optional[float] = None,
+) -> Tuple[Dict, Optional[Tuple[str, str]]]:
+    """
+    1. คำนวณพิกัดเริ่มต้นจากราคา Spot สด
+    2. เปิดกราฟ TradingView OANDA:XAUUSD (15m) ใน Playwright
+    3. อ่านตัวเลขราคาปิดจริง ("ปิด X,XXX.XXX") ที่แสดงบนหน้าจอกราฟ TradingView ณ วินาทีนั้น
+    4. อัปเดตตัวเลขบนหัวกราฟ, แถบสีเหลือง "👉 ราคา XAU/USD (Spot) ณ ปัจจุบัน", และเรียงลำดับบันไดราคาใหม่ทันทีก่อนแคปภาพ!
+    5. คืนค่า exact_calc ที่คำนวณด้วยราคา Spot เดียวกับบนกราฟ 100.00% เพื่อใช้สร้างข้อความรายงานใน Telegram
+    """
+    exact_calc = compute_exact_coordinates(snap, prev_state, live_spot_override=initial_live_spot)
     ts = datetime.now().strftime("%Y%m%d_%H%M")
     out_path = f"hizeiris_4_xauusd_spot_{ts}.png"
     tb = exact_calc["sd_table_exact"]
@@ -1007,67 +1057,92 @@ def render_xauusd_spot_chart_and_ladder(snap: HizeirisSnapshot, exact_calc: Dict
     mvc = exact_calc["morning_vs_current"]
     spot = exact_calc["spot"]
     open_spot = exact_calc["open_spot"]
+    one_sd_range = tb["range_1sd"]
 
     ladder_items = [
         {
+            "id": "sell3",
             "price": tb["sell_3sd"],
             "cls": "sell3",
-            "label": f"🔴 3SD SELL (เข้า {tb['sell_3sd']:,.2f} -> TP {tb['sell_3sd']-25:,.2f}/{tb['sell_3sd']-35:,.2f} | SL {tb['sell_3sd']+8:,.2f})",
+            "title": "🔴 3SD SELL (ปลายหาง 5ΔC)",
+            "sub": f"TP {tb['sell_3sd']-25:,.2f} / {tb['sell_3sd']-35:,.2f} | SL {tb['sell_3sd']+8:,.2f}",
         },
         {
+            "id": "sell2",
             "price": tb["sell_2sd"],
             "cls": "sell2",
-            "label": f"🔥 2SD SELL Kill Zone (เข้า {tb['sell_2sd']:,.2f} -> TP {tb['sell_2sd']-15:,.2f}/{tb['sell_2sd']-25:,.2f} | SL {tb['sell_2sd']+8:,.2f})",
+            "title": "🔥 2SD SELL (Kill Zone 15ΔC)",
+            "sub": f"TP {tb['sell_2sd']-15:,.2f} / {tb['sell_2sd']-25:,.2f} | SL {tb['sell_2sd']+8:,.2f}",
         },
         {
+            "id": "sell1",
             "price": tb["sell_1sd"],
             "cls": "sell1",
-            "label": f"🟠 1SD SELL เก็บสั้น (เข้า {tb['sell_1sd']:,.2f} -> TP {tb['sell_1sd']-8:,.2f}/{tb['sell_1sd']-12:,.2f} | SL {tb['sell_1sd']+8:,.2f})",
+            "title": "🟠 1SD SELL (ย่อสั้น 25ΔC)",
+            "sub": f"TP {tb['sell_1sd']-8:,.2f} / {tb['sell_1sd']-12:,.2f} | SL {tb['sell_1sd']+8:,.2f}",
         },
         {
+            "id": "call_wall",
             "price": ws["call_wall_spot"],
             "cls": "wall",
-            "label": f"🧱 กำแพง Call Wall (เข้า SELL {ws['call_wall_spot']:,.2f} -> TP {ws['call_wall_spot']-10:,.2f}/{ws['call_wall_spot']-25:,.2f} | SL {ws['call_wall_spot']+8:,.2f})",
+            "title": f"🧱 Call Wall (Fut {snap.call_wall:.0f})",
+            "sub": f"SELL TP {ws['call_wall_spot']-10:,.2f} / {ws['call_wall_spot']-25:,.2f} | SL {ws['call_wall_spot']+8:,.2f}",
         },
         {
+            "id": "max_pain",
             "price": ws["max_pain_spot"],
             "cls": "wall",
-            "label": f"🧲 จุดดูดแม่เหล็ก Max Pain (Fut {snap.max_pain:.0f} | ห่างราคาปัจจุบัน {exact_calc['dist_max_pain']:+.2f})",
+            "title": f"🧲 Max Pain (Fut {snap.max_pain:.0f})",
+            "sub": "จุดดูดแม่เหล็ก (ไม่ใช่จุดดักทุบ)",
         },
         {
+            "id": "open_spot",
             "price": open_spot,
             "cls": "open-lvl",
-            "label": f"⚓ ราคาเปิด Spot ตอนเช้า 06:30 (Fut {exact_calc['open_fut']:,.2f})",
+            "title": "⚓ ราคาเปิดเช้า (06:30 Open)",
+            "sub": f"Futures ตอนเปิด {exact_calc['open_fut']:,.2f} (หัก Diff {snap.diff:.2f})",
         },
         {
+            "id": "spot_now",
             "price": spot,
             "cls": "spot-now",
-            "label": f"👉 ราคา XAU/USD (Spot) ณ ปัจจุบัน ({mvc['delta_px_from_open']} จุดจากเช้า = {mvc['z_from_open']})",
+            "title": "👉 ราคา XAU/USD (Spot) ปัจจุบัน",
+            "sub": f"เปลี่ยนจากเช้า {mvc['delta_px_from_open']} จุด ({mvc['z_from_open']})",
         },
         {
+            "id": "put_wall",
             "price": ws["put_wall_spot"],
             "cls": "wall",
-            "label": f"🧱 กำแพง Put Wall (เข้า BUY {ws['put_wall_spot']:,.2f} -> TP {ws['put_wall_spot']+10:,.2f}/{ws['put_wall_spot']+25:,.2f} | SL {ws['put_wall_spot']-8:,.2f})",
+            "title": f"🧱 Put Wall (Fut {snap.put_wall:.0f})",
+            "sub": f"BUY TP {ws['put_wall_spot']+10:,.2f} / {ws['put_wall_spot']+25:,.2f} | SL {ws['put_wall_spot']-8:,.2f}",
         },
         {
+            "id": "buy1",
             "price": tb["buy_1sd"],
             "cls": "buy1",
-            "label": f"🟢 1SD BUY เก็บสั้น (เข้า {tb['buy_1sd']:,.2f} -> TP {tb['buy_1sd']+8:,.2f}/{tb['buy_1sd']+12:,.2f} | SL {tb['buy_1sd']-8:,.2f})",
+            "title": "🟢 1SD BUY (เด้งสั้น 25ΔP)",
+            "sub": f"TP {tb['buy_1sd']+8:,.2f} / {tb['buy_1sd']+12:,.2f} | SL {tb['buy_1sd']-8:,.2f}",
         },
         {
+            "id": "buy2",
             "price": tb["buy_2sd"],
             "cls": "buy2",
-            "label": f"🔥 2SD BUY Kill Zone (เข้า {tb['buy_2sd']:,.2f} -> TP {tb['buy_2sd']+15:,.2f}/{tb['buy_2sd']+25:,.2f} | SL {tb['buy_2sd']-8:,.2f})",
+            "title": "🔥 2SD BUY (Kill Zone 15ΔP)",
+            "sub": f"TP {tb['buy_2sd']+15:,.2f} / {tb['buy_2sd']+25:,.2f} | SL {tb['buy_2sd']-8:,.2f}",
         },
         {
+            "id": "buy3",
             "price": tb["buy_3sd"],
             "cls": "buy3",
-            "label": f"🟢 3SD BUY ปลายหาง (เข้า {tb['buy_3sd']:,.2f} -> TP {tb['buy_3sd']+25:,.2f}/{tb['buy_3sd']+35:,.2f} | SL {tb['buy_3sd']-8:,.2f})",
+            "title": "🟢 3SD BUY (ปลายหาง 5ΔP)",
+            "sub": f"TP {tb['buy_3sd']+25:,.2f} / {tb['buy_3sd']+35:,.2f} | SL {tb['buy_3sd']-8:,.2f}",
         },
     ]
     ladder_items.sort(key=lambda item: float(item["price"]), reverse=True)
     ladder_html = "\n".join(
-        f'      <div class="lvl {it["cls"]}"><span>{it["label"]}</span><span class="px">{it["price"]:,.2f}</span></div>'
+        f'      <div class="lvl {it["cls"]}" id="row_{it["id"]}" data-price="{it["price"]:.2f}">'
+        f'<div class="lvl-left"><span class="lvl-title">{it["title"]}</span><span class="lvl-sub" id="sub_{it["id"]}">{it["sub"]}</span></div>'
+        f'<span class="px" id="px_{it["id"]}">{it["price"]:,.2f}</span></div>'
         for it in ladder_items
     )
 
@@ -1079,57 +1154,96 @@ def render_xauusd_spot_chart_and_ladder(snap: HizeirisSnapshot, exact_calc: Dict
 <style>
   * {{ box-sizing: border-box; font-family: 'Noto Sans Thai', sans-serif; margin: 0; padding: 0; }}
   body {{ background: #0b0e14; color: #f1f5f9; width: 1600px; height: 980px; display: flex; overflow: hidden; }}
-  .left-chart {{ width: 990px; height: 980px; border-right: 2px solid #1e293b; display: flex; flex-direction: column; }}
-  .chart-header {{ height: 68px; background: #111827; padding: 12px 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #1e293b; }}
-  .spot-badge {{ font-size: 27px; font-weight: 800; color: #fbbf24; }}
-  .sub-badge {{ font-size: 14.5px; color: #94a3b8; }}
-  #tv_chart_container {{ flex: 1; width: 100%; height: 912px; }}
-  .right-panel {{ width: 610px; height: 980px; background: #0f172a; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }}
-  .panel-title {{ font-size: 18px; font-weight: 800; color: #38bdf8; border-bottom: 1px solid #334155; padding-bottom: 5px; }}
-  .action-card {{ background: #1e293b; border-left: 5px solid #fbbf24; border-radius: 8px; padding: 9px 12px; font-size: 13px; line-height: 1.48; }}
+  .left-chart {{ width: 960px; height: 980px; border-right: 2px solid #1e293b; display: flex; flex-direction: column; }}
+  .chart-header {{ height: 72px; background: #111827; padding: 10px 18px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #1e293b; }}
+  .spot-badge {{ font-size: 26px; font-weight: 800; color: #fbbf24; }}
+  .sub-badge {{ font-size: 13.5px; color: #94a3b8; margin-top: 2px; }}
+  #tv_chart_container {{ flex: 1; width: 100%; height: 908px; }}
+  .right-panel {{ width: 640px; height: 980px; background: #0f172a; padding: 12px 16px; display: flex; flex-direction: column; gap: 7px; overflow: hidden; }}
+  .panel-title {{ font-size: 17px; font-weight: 800; color: #38bdf8; border-bottom: 1px solid #334155; padding-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .action-card {{ background: #1e293b; border-left: 4px solid #fbbf24; border-radius: 8px; padding: 8px 11px; font-size: 12.2px; line-height: 1.45; }}
+  .action-row {{ display: flex; justify-content: space-between; gap: 6px; white-space: nowrap; }}
   .ladder {{ display: flex; flex-direction: column; gap: 4px; flex: 1; justify-content: space-between; }}
-  .lvl {{ display: flex; justify-content: space-between; align-items: center; padding: 5px 10px; border-radius: 6px; font-size: 12.8px; font-weight: 600; }}
-  .sell3 {{ background: rgba(239,68,68,0.22); border: 1px solid #ef4444; color: #fca5a5; }}
-  .sell2 {{ background: rgba(239,68,68,0.32); border: 2px solid #f87171; color: #fecaca; font-weight: 800; }}
+  .lvl {{ display: flex; justify-content: space-between; align-items: center; padding: 5px 11px; border-radius: 6px; gap: 8px; }}
+  .lvl-left {{ display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1; overflow: hidden; }}
+  .lvl-title {{ font-size: 13px; font-weight: 700; white-space: nowrap; flex-shrink: 0; }}
+  .lvl-sub {{ font-size: 11.8px; opacity: 0.92; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .sell3 {{ background: rgba(239,68,68,0.20); border: 1px solid #ef4444; color: #fca5a5; }}
+  .sell2 {{ background: rgba(239,68,68,0.30); border: 2px solid #f87171; color: #fecaca; }}
   .sell1 {{ background: rgba(251,146,60,0.20); border: 1px solid #fb923c; color: #fdba74; }}
-  .wall {{ background: rgba(56,189,248,0.18); border: 1px dashed #38bdf8; color: #bae6fd; }}
+  .wall {{ background: rgba(56,189,248,0.16); border: 1px dashed #38bdf8; color: #bae6fd; }}
   .open-lvl {{ background: rgba(148,163,184,0.18); border: 1px solid #94a3b8; color: #e2e8f0; }}
-  .spot-now {{ background: linear-gradient(90deg, #ca8a04, #eab308); color: #000; font-size: 15px; font-weight: 800; padding: 7px 11px; border-radius: 8px; box-shadow: 0 0 12px rgba(234,179,8,0.5); }}
+  .spot-now {{ background: linear-gradient(90deg, #ca8a04, #eab308); color: #000; padding: 6px 11px; border-radius: 7px; box-shadow: 0 0 10px rgba(234,179,8,0.45); }}
+  .spot-now .lvl-title, .spot-now .lvl-sub, .spot-now .px {{ color: #000 !important; font-weight: 800 !important; }}
   .buy1 {{ background: rgba(74,222,128,0.18); border: 1px solid #4ade80; color: #bbf7d0; }}
-  .buy2 {{ background: rgba(34,197,94,0.30); border: 2px solid #22c55e; color: #dcfce7; font-weight: 800; }}
-  .buy3 {{ background: rgba(22,163,74,0.22); border: 1px solid #16a34a; color: #86efac; }}
-  .px {{ font-size: 15px; font-weight: 800; margin-left: 8px; white-space: nowrap; }}
+  .buy2 {{ background: rgba(34,197,94,0.28); border: 2px solid #22c55e; color: #dcfce7; }}
+  .buy3 {{ background: rgba(22,163,74,0.20); border: 1px solid #16a34a; color: #86efac; }}
+  .px {{ font-size: 15px; font-weight: 800; flex-shrink: 0; text-align: right; min-width: 72px; }}
 </style>
 </head>
 <body>
   <div class="left-chart">
     <div class="chart-header">
       <div>
-        <div class="spot-badge">🥇 XAU/USD (Spot): {spot:,.2f}</div>
-        <div class="sub-badge">CME {html_lib.escape(snap.contract_name)} ({html_lib.escape(snap.round_str)}): {snap.futures_price:,.1f} | หัก Diff: {snap.diff:.2f} | เวลา: {html_lib.escape(snap.timestamp)}</div>
+        <div class="spot-badge" id="hdr_spot">🥇 XAU/USD (Spot): {spot:,.2f}</div>
+        <div class="sub-badge" id="hdr_sub_left">CME {html_lib.escape(snap.contract_name)} ({html_lib.escape(snap.round_str)}): Fut รอบ OI {snap.futures_price:,.1f} | หัก Diff: {snap.diff:.2f} | เวลา: {html_lib.escape(snap.timestamp)}</div>
       </div>
       <div style="text-align:right;">
-        <div style="font-size:15.5px;font-weight:700;color:#38bdf8;">ราคาเปิดเช้า (06:30): {open_spot:,.2f}</div>
-        <div class="sub-badge">เปลี่ยนจากเช้า: {mvc['delta_px_from_open']} จุด ({mvc['z_from_open']}) | IV เช้า {snap.open_iv:.2f}% -> สด {snap.atm_iv:.2f}%</div>
+        <div style="font-size:15px;font-weight:700;color:#38bdf8;">ราคาเปิดเช้า (06:30): {open_spot:,.2f}</div>
+        <div class="sub-badge" id="hdr_sub_right">เปลี่ยนจากเช้า: {mvc['delta_px_from_open']} จุด ({mvc['z_from_open']}) | IV เช้า {snap.open_iv:.2f}% -> สด {snap.atm_iv:.2f}%</div>
       </div>
     </div>
     <div id="tv_chart_container"></div>
   </div>
   <div class="right-panel">
-    <div class="panel-title">📐 ผังพิกัดจุดเข้า–ออก XAU/USD (แยกจุดเข้าเดียว TP/SL สัมพันธ์กัน 100%)</div>
+    <div class="panel-title">📐 ผังพิกัดจุดเข้า–ออก XAU/USD (จุดเข้าเดียวชัดเจน TP/SL สัมพันธ์กัน 100%)</div>
     <div class="action-card">
-      <div style="color:#fbbf24;font-weight:800;margin-bottom:3px;">⚡ โพยจุดเข้าเดียวชัดเจน (BUY: TP &gt; จุดเข้า &gt; SL | SELL: TP &lt; จุดเข้า &lt; SL):</div>
-      <div>• <b>1SD BUY (เด้งสั้น)</b>: เข้า <b>{tb['buy_1sd']:,.2f}</b> -> TP <b>{tb['buy_1sd']+8:,.2f} / {tb['buy_1sd']+12:,.2f}</b> | SL ปกติ <b>{tb['buy_1sd']-8:,.2f}</b> (ทบ 2x <b>{tb['buy_1sd']-12.5:,.2f}</b>)</div>
-      <div>• <b>2SD BUY (คำใหญ่)</b>: เข้า <b>{tb['buy_2sd']:,.2f}</b> -> TP <b>{tb['buy_2sd']+15:,.2f} / {tb['buy_2sd']+25:,.2f}</b> | SL ปกติ <b>{tb['buy_2sd']-8:,.2f}</b> (ทบ 2x <b>{tb['buy_2sd']-12.5:,.2f}</b>)</div>
-      <div>• <b>1SD SELL (ย่อสั้น)</b>: เข้า <b>{tb['sell_1sd']:,.2f}</b> -> TP <b>{tb['sell_1sd']-8:,.2f} / {tb['sell_1sd']-12:,.2f}</b> | SL ปกติ <b>{tb['sell_1sd']+8:,.2f}</b> (ทบ 2x <b>{tb['sell_1sd']+12.5:,.2f}</b>)</div>
-      <div>• <b>2SD SELL (คำใหญ่)</b>: เข้า <b>{tb['sell_2sd']:,.2f}</b> -> TP <b>{tb['sell_2sd']-15:,.2f} / {tb['sell_2sd']-25:,.2f}</b> | SL ปกติ <b>{tb['sell_2sd']+8:,.2f}</b> (ทบ 2x <b>{tb['sell_2sd']+12.5:,.2f}</b>)</div>
+      <div style="color:#fbbf24;font-weight:800;margin-bottom:3px;">⚡ โพยจุดเข้าหลัก (BUY: TP &gt; จุดเข้า &gt; SL | SELL: TP &lt; จุดเข้า &lt; SL):</div>
+      <div class="action-row"><span>🟢 <b>1SD BUY (เด้งสั้น)</b>: เข้า <b>{tb['buy_1sd']:,.2f}</b></span><span>TP <b>{tb['buy_1sd']+8:,.2f} / {tb['buy_1sd']+12:,.2f}</b> | SL <b>{tb['buy_1sd']-8:,.2f}</b> (ทบ 2x <b>{tb['buy_1sd']-12.5:,.2f}</b>)</span></div>
+      <div class="action-row"><span>🟢 <b>2SD BUY (คำใหญ่)</b>: เข้า <b>{tb['buy_2sd']:,.2f}</b></span><span>TP <b>{tb['buy_2sd']+15:,.2f} / {tb['buy_2sd']+25:,.2f}</b> | SL <b>{tb['buy_2sd']-8:,.2f}</b> (ทบ 2x <b>{tb['buy_2sd']-12.5:,.2f}</b>)</span></div>
+      <div class="action-row"><span>🔴 <b>1SD SELL (ย่อสั้น)</b>: เข้า <b>{tb['sell_1sd']:,.2f}</b></span><span>TP <b>{tb['sell_1sd']-8:,.2f} / {tb['sell_1sd']-12:,.2f}</b> | SL <b>{tb['sell_1sd']+8:,.2f}</b> (ทบ 2x <b>{tb['sell_1sd']+12.5:,.2f}</b>)</span></div>
+      <div class="action-row"><span>🔴 <b>2SD SELL (คำใหญ่)</b>: เข้า <b>{tb['sell_2sd']:,.2f}</b></span><span>TP <b>{tb['sell_2sd']-15:,.2f} / {tb['sell_2sd']-25:,.2f}</b> | SL <b>{tb['sell_2sd']+8:,.2f}</b> (ทบ 2x <b>{tb['sell_2sd']+12.5:,.2f}</b>)</span></div>
     </div>
-    <div class="ladder">
+    <div class="ladder" id="ladder_box">
 {ladder_html}
     </div>
   </div>
   <script src="https://s3.tradingview.com/tv.js"></script>
   <script>
+    function updateSpotOnCard(newSpot) {{
+      const openSpot = {open_spot:.2f};
+      const oneSd = {max(one_sd_range, 1.0):.2f};
+      const delta = newSpot - openSpot;
+      const z = delta / oneSd;
+      const signDelta = (delta >= 0 ? '+' : '') + delta.toFixed(2);
+      const signZ = (z >= 0 ? '+' : '') + z.toFixed(2) + 'SD';
+      const fmtSpot = newSpot.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
+
+      const hdr = document.getElementById('hdr_spot');
+      if (hdr) hdr.innerText = '🥇 XAU/USD (Spot): ' + fmtSpot;
+
+      const hdrRight = document.getElementById('hdr_sub_right');
+      if (hdrRight) {{
+        hdrRight.innerText = 'เปลี่ยนจากเช้า: ' + signDelta + ' จุด (' + signZ + ') | IV เช้า {snap.open_iv:.2f}% -> สด {snap.atm_iv:.2f}%';
+      }}
+
+      const rowSpot = document.getElementById('row_spot_now');
+      const pxSpot = document.getElementById('px_spot_now');
+      const subSpot = document.getElementById('sub_spot_now');
+      if (rowSpot && pxSpot && subSpot) {{
+        rowSpot.setAttribute('data-price', newSpot.toFixed(2));
+        pxSpot.innerText = fmtSpot;
+        subSpot.innerText = 'เปลี่ยนจากเช้า ' + signDelta + ' จุด (' + signZ + ')';
+      }}
+
+      const box = document.getElementById('ladder_box');
+      if (box) {{
+        const rows = Array.from(box.querySelectorAll('.lvl'));
+        rows.sort((a, b) => parseFloat(b.getAttribute('data-price') || '0') - parseFloat(a.getAttribute('data-price') || '0'));
+        rows.forEach(r => box.appendChild(r));
+      }}
+    }}
+
     if (window.TradingView) {{
       new TradingView.widget({{
         "autosize": true,
@@ -1155,25 +1269,53 @@ def render_xauusd_spot_chart_and_ladder(snap: HizeirisSnapshot, exact_calc: Dict
     with open(html_file, "w", encoding="utf-8") as f:
         f.write(html_content)
 
+    if CONFIG["DRY_RUN"] and not os.getenv("TEST_RENDER_SPOT_CARD"):
+        return exact_calc, None
+
     try:
         from playwright.sync_api import sync_playwright
+        detected_chart_spot: Optional[float] = None
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": 1600, "height": 980})
             page.goto(f"file://{html_file}", wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(5500)
+
+            # ดึงราคาปิดสด ("ปิด 3,870.275" หรือ "C 3,870.275") จาก iframe ของกราฟ TradingView โดยตรง!
+            for frame in page.frames:
+                try:
+                    ftxt = frame.inner_text("body", timeout=1500)
+                    m_close = re.search(r"(?:ปิด|C)\s*([2-5],?[0-9]{3}\.[0-9]{1,3})", ftxt)
+                    if m_close:
+                        cand = round(float(m_close.group(1).replace(",", "")), 2)
+                        if _is_valid_gold_price(cand, snap.futures_price):
+                            detected_chart_spot = cand
+                            break
+                except Exception:
+                    pass
+
+            # หากอ่านราคาปิดจากกราฟ TradingView ได้ ให้ซิงค์ตัวเลขบนการ์ดและบันไดราคาทันทีก่อนแคปภาพ!
+            if detected_chart_spot is not None:
+                print(f"🎯 ซิงค์ราคา Spot XAU/USD จากหน้าจอกราฟ TradingView จริงสำเร็จ: {detected_chart_spot:,.2f}")
+                page.evaluate(f"updateSpotOnCard({detected_chart_spot:.2f})")
+                page.wait_for_timeout(300)
+                exact_calc = compute_exact_coordinates(snap, prev_state, live_spot_override=detected_chart_spot)
+                spot = exact_calc["spot"]
+                tb = exact_calc["sd_table_exact"]
+
             page.screenshot(path=out_path, full_page=False)
             browser.close()
+
         caption = (
             f"🥇 [ภาพที่ 4] กราฟราคา Spot XAU/USD ปัจจุบัน ({spot:,.2f}) & ผังพิกัดจุดเข้า–ออก 6 โซน Fixed SD\n"
             f"• ราคาเปิดเช้า: {open_spot:,.2f} | 1SD Buy/Sell: {tb['buy_1sd']:,.2f} / {tb['sell_1sd']:,.2f} | "
             f"2SD Buy/Sell: {tb['buy_2sd']:,.2f} / {tb['sell_2sd']:,.2f}"
         )
-        print(f"✅ สร้างภาพกราฟ Spot XAU/USD ({out_path}) สำเร็จ!")
-        return out_path, caption
+        print(f"✅ สร้างภาพกราฟ Spot XAU/USD ({out_path}) ที่ตรงกับข้อความรายงาน 100% สำเร็จ!")
+        return exact_calc, (out_path, caption)
     except Exception as e:
         print(f"⚠️ สร้างภาพกราฟ Spot XAU/USD ข้ามไป ({e})")
-        return None
+        return exact_calc, None
 
 
 # ==============================================================================
@@ -1419,6 +1561,10 @@ def parse_snapshot_from_dom_text(
     if fut_px == 0.0:
         fut_px = _parse_float(r"ราคากลาง\s*([2-5],?[0-9]{3}(?:\.[0-9]+)?)", raw_text, 3864.8)
 
+    # ดึงราคา Futures ล่าสุดจากข้อความ "ล่าสุด XXXX.X" บนแท็บ SD·diff (ถ้ามี)
+    latest_gc_val = _parse_float(r"ล่าสุด\s*([2-5],?[0-9]{3}(?:\.[0-9]+)?)", raw_text, 0.0)
+    latest_gc_fut = latest_gc_val if _is_valid_gold_price(latest_gc_val, fut_px) else None
+
     dte = _parse_float(r"DTE\s*([0-9]+\.?[0-9]*)", raw_text, 0.38)
 
     sd_diff_open_fut = _parse_float(r"ราคาเปิด\s*([2-5],?[0-9]{3}\.[0-9]+)", raw_text, 0.0)
@@ -1573,6 +1719,7 @@ def parse_snapshot_from_dom_text(
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M"),
         round_str=round_str,
         futures_price=fut_px,
+        latest_gc_fut=latest_gc_fut,
         future_chg=future_chg,
         daily_open_fut=daily_open_fut,
         daily_open_spot=daily_open_spot,
@@ -1635,11 +1782,6 @@ def _format_cheat_sheet_ticket(idx: int, t: Dict[str, object], spot: float) -> s
 
 
 def build_clean_section_messages(snap: HizeirisSnapshot, exact_calc: Dict, round_history: List[Dict], ai_audit_text: str = "") -> List[str]:
-    """
-    จัดหน้ากระดาษรายงานใหม่ให้อ่านง่าย สะอาดตา แยกเป็น 5 ข้อความตามหมวดหมู่ชัดเจน
-    โดยแยกกล่อง "สรุปฟันธงหน้างาน & โพยจุดเข้า–ออก" เป็นข้อความที่ 1 โดยเฉพาะ (ไม่ถูกตัดครึ่งกลางออเดอร์)
-    และรับประกันว่า TP / SL สัมพันธ์กับจุดเข้า 100% ทุกไม้
-    """
     tb = exact_calc["sd_table_exact"]
     dyn = exact_calc["cme_dynamic_spot"]
     ws = exact_calc["walls_spot"]
@@ -1663,12 +1805,11 @@ def build_clean_section_messages(snap: HizeirisSnapshot, exact_calc: Dict, round
         for i, t in enumerate(tactical["sell_tickets"][:3], 1)
     )
 
-    # -------------------- ข้อความที่ 1: สรุปฟันธงหน้างาน & โพยจุดเข้า-ออก (Quick Cheat Sheet) --------------------
     msg_0 = (
         f"⚡ *สรุปฟันธงหน้างาน (จากราคาปัจจุบันควรเข้าตรงไหน)*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🥇 *ราคา XAU/USD (Spot) ปัจจุบัน*: *`{spot:,.2f}`*\n"
-        f"• ราคา Futures (`{snap.contract_name}` {snap.round_str}): `{snap.futures_price:,.1f}` (หัก Diff `{snap.diff:.2f}`)\n"
+        f"🥇 *ราคา XAU/USD (Spot) ปัจจุบัน*: *`{spot:,.2f}`* _(ตรงกับกราฟ `[ภาพที่ 4]` 100%)_\n"
+        f"• ราคา Futures เทียบ Spot ปัจจุบัน: `{exact_calc['implied_live_fut']:,.2f}` | Futures ตอนเก็บรอบ OI (`{snap.contract_name}` {snap.round_str}): `{snap.futures_price:,.1f}` (หัก Diff `{snap.diff:.2f}`)\n"
         f"• เทียบราคาเปิดเช้า (`{exact_calc['open_spot']:,.2f}`): เปลี่ยนแปลง *`{mvc['delta_px_from_open']}` จุด* (`{mvc['z_from_open']}`)\n"
         f"• สถานะหน้างาน: {exact_calc['immediate_verdict']}\n\n"
         f"🎯 *โพยจุดเข้า–ออกแยกตามด่าน (จุดเข้าเดียวชัดเจน — TP/SL สัมพันธ์กัน 100%)*:\n"
@@ -1679,7 +1820,6 @@ def build_clean_section_messages(snap: HizeirisSnapshot, exact_calc: Dict, round
         f"{sell_cheat_lines}"
     )
 
-    # -------------------- ข้อความที่ 2: ส่วนที่ 1 (พารามิเตอร์ & เปรียบเทียบกรอบเช้า vs รอบปัจจุบัน) --------------------
     msg_1 = (
         f"📊 *ส่วนที่ 1: สรุปพารามิเตอร์ & เปรียบเทียบกรอบเช้า (06:30, DTE 0.8) vs รอบปัจจุบัน*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1699,7 +1839,6 @@ def build_clean_section_messages(snap: HizeirisSnapshot, exact_calc: Dict, round
         f"• *กฎเวลา 0DTE*: {m4['eod_warning']}"
     )
 
-    # -------------------- ข้อความที่ 3: ส่วนที่ 2 (ตารางพิกัด) + ส่วนที่ 3 (Edge Scorecard) --------------------
     msg_2 = (
         f"🧱 *ส่วนที่ 2: ตารางพิกัดแนวรับ-แนวต้านคืนนี้ (หัก Diff {snap.diff:.2f}: เทียบ Fix เช้า DTE 0.8 vs รอบปัจจุบัน)*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1724,7 +1863,7 @@ def build_clean_section_messages(snap: HizeirisSnapshot, exact_calc: Dict, round
         f"   • Max Pain (จุดดูดแม่เหล็ก ไม่ใช่จุดดักทุบ): *`{ws['max_pain_spot']:,.2f}`* (Fut `{ws['max_pain_fut']:,.0f}`, ห่างราคาปัจจุบัน `{exact_calc['dist_max_pain']:+.2f}`)\n\n"
         f"⚓ *แกนกลางวันนี้ (Pivot & ราคาปัจจุบัน)*:\n"
         f"   • ราคาเปิดเช้า (06:30): *`{exact_calc['open_spot']:,.2f}`* (Fut `{exact_calc['open_fut']:,.2f}`)\n"
-        f"   • 👉 *ราคา XAU/USD ปัจจุบัน*: *`{spot:,.2f}`* (Fut `{snap.futures_price:,.1f}`)\n\n"
+        f"   • 👉 *ราคา XAU/USD ปัจจุบัน (ตรงกับกราฟภาพที่ 4)*: *`{spot:,.2f}`* (Fut เทียบ Spot `{exact_calc['implied_live_fut']:,.2f}`)\n\n"
         f"🔽 *โซนแนวรับฝั่งล่าง (เรียงจากกลางลงมาต่ำสุด)*:\n\n"
         f"5️⃣ *กำแพง Put Wall ปัจจุบัน (แยกพิกัดเฉพาะ)*\n"
         f"   • Put Wall ({snap.put_wall_pc}): *`{ws['put_wall_spot']:,.2f}`* (Fut `{ws['put_wall_fut']:,.0f}`) -> หากดัก BUY ที่ `{ws['put_wall_spot']:,.2f}` เป้า TP = `{ws['put_wall_spot'] + 10.0:,.2f}` / `{ws['put_wall_spot'] + 25.0:,.2f}` | SL ปกติ = `{ws['put_wall_spot'] - 8.0:,.2f}`\n\n"
@@ -1762,7 +1901,6 @@ def build_clean_section_messages(snap: HizeirisSnapshot, exact_calc: Dict, round
         f"   • ไล่ซื้อไม่มี OI รองรับ: ชนะแค่ *`50.0%–52.0%`* | ไล่ทุบซื้อ Put ก้นหลุมตอน IV แพง: ชนะแค่ *`30.0%–40.0%`*"
     )
 
-    # -------------------- ข้อความที่ 4: ส่วนที่ 4 (แผนปฏิบัติการครบทั้ง 6 โซน Fixed SD) --------------------
     zone_blocks = []
     for z in zones:
         dir_label = "ราคาขึ้นสูงกว่าจุดเข้า" if z["side"] == "BUY" else "ราคาลงต่ำกว่าจุดเข้า"
@@ -1794,7 +1932,6 @@ def build_clean_section_messages(snap: HizeirisSnapshot, exact_calc: Dict, round
         f"   • ฝั่งทะลุลง: ยืนต่ำกว่า *`{pc['put_wall_break']:,.2f}`* พร้อม Vol สดพุ่งชัน -> Follow SELL เป้า *`{pc['put_squeeze_tp']:,.2f}`* (กำไร `+12.5` จุด) | SL *`{pc['put_squeeze_sl']:,.2f}`* (`-8.0` จุด)"
     )
 
-    # -------------------- ข้อความที่ 5: ส่วนที่ 5, 6 (สมุดบันทึกประวัติรายรอบ), และ 7 (AI Cross-Check) --------------------
     history_table_str = _format_round_history_log(round_history)
     ai_block = (
         f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1840,8 +1977,8 @@ def synthesize_full_report_messages(snap: HizeirisSnapshot, exact_calc: Dict, ca
         "1) ✅ ตรวจความถูกต้องตัวเลขบนภาพ (Futures, Diff, ราคาเปิดเช้า, 1SD/2SD/3SD, Call/Put Wall)\n"
         "2) 📊 อ่านหัวเสา Put/Call จริงที่โดดเด่นบนกราฟ Intraday & OI และชี้จุดปั๊มน้ำมันของรถไม่มีเบรก\n"
         "3) 📈 วิเคราะห์ความชันเส้นเขียว Vol สด vs เส้นประแดง Vol Settle ทั้งฝั่งซ้าย (Put) และฝั่งขวา (Call)\n"
-        "4) 🎯 ฟันธงยืนยันจุดเข้าเทรดที่ดีที่สุดจากราคาปัจจุบัน โดยระบุ จุดเข้าเดียว -> TP1/TP2 -> SL ปกติ ที่สัมพันธ์กัน 100%\n\n"
-        f"Spot ปัจจุบัน: {exact_calc['spot']:.2f} | OpenSpot: {exact_calc['open_spot']:.2f} | Diff: {snap.diff:.2f}\n"
+        "4) 🎯 ฟันธงยืนยันจุดเข้าเทรดที่ดีที่สุดจากราคา Spot ปัจจุบัน โดยระบุ จุดเข้าเดียว -> TP1/TP2 -> SL ปกติ ที่สัมพันธ์กัน 100%\n\n"
+        f"Spot ปัจจุบัน (ตรงกับกราฟ TradingView): {exact_calc['spot']:.2f} | OpenSpot: {exact_calc['open_spot']:.2f} | Diff: {snap.diff:.2f}\n"
         f"Fixed SD เช้า: 1SD Buy/Sell = {tb['buy_1sd']:.2f}/{tb['sell_1sd']:.2f} | 2SD Buy/Sell = {tb['buy_2sd']:.2f}/{tb['sell_2sd']:.2f}\n"
         f"Walls: PutWall {ws['put_wall_spot']:.2f} | CallWall {ws['call_wall_spot']:.2f} | MaxPain {ws['max_pain_spot']:.2f}"
     )
@@ -1855,7 +1992,7 @@ def synthesize_full_report_messages(snap: HizeirisSnapshot, exact_calc: Dict, ca
             timeout_sec=45,
         )
     except Exception:
-        ai_audit = "• รอบนี้ระบบใช้ผลคำนวณเชิงปริมาณ Modules 1–6 จาก Python โดยตรง (ตรวจสอบความสัมพันธ์ Entry / TP / SL ครบ 100%)"
+        ai_audit = "• รอบนี้ระบบใช้ผลคำนวณเชิงปริมาณ Modules 1–6 จาก Python โดยตรง (ซิงค์ราคา Spot ตรงกับกราฟภาพที่ 4 และตรวจสมการ Entry / TP / SL ครบ 100%)"
 
     return build_clean_section_messages(snap, exact_calc, round_history, ai_audit)
 
@@ -1956,20 +2093,21 @@ def run_once():
             contract_name="G3MX6",
             timestamp=datetime.now().strftime("%Y-%m-%d %H:%M"),
             round_str="รอบ 134/134",
-            futures_price=3861.2,
-            future_chg=1.7,
+            futures_price=3858.5,
+            latest_gc_fut=3872.78,
+            future_chg=13.28,
             daily_open_fut=3859.50,
             daily_open_spot=3857.00,
-            open_iv=21.10,
+            open_iv=26.45,
             open_source="ตาราง SD·diff (IV ตอนเปิด 06:30)",
             diff=tg_diff or 2.50,
             raw_market_diff=2.50,
             diff_source="แท็บ SD·diff (ปัด 2.50)",
             dte=0.38,
             fixed_dte=CONFIG["FIXED_DTE"],
-            atm_iv=21.10,
-            vol_chg=0.00,
-            vol_settle_atm=21.10,
+            atm_iv=23.06,
+            vol_chg=-3.39,
+            vol_settle_atm=26.45,
             intraday_c=634,
             intraday_p=370,
             intraday_pc=0.58,
@@ -1986,12 +2124,12 @@ def run_once():
             max_pain=3875.0,
             top_inflow_text="โฟลว์รายวัน Intraday C 634 vs P 370 (P/C 0.58)",
             top_oi_text="ฐานสะสม OI C 622 vs P 1,058 (P/C 1.70) | Put Wall 3850 / Call Wall 3900",
-            cme_vol_series_text="G3MX6 DTE 0.38 IV 21.10% (Normal Contango)",
+            cme_vol_series_text="G3MX6 DTE 0.38 IV 23.06% (Normal Contango)",
             pillar_labels_text="30/0, 36/7, 61/8, 13/46, 8/61, 6/43, 1/49, 18/71, 1/113, 1/54",
             sd_diff_table={
                 "range_1sd": 47.79, "buy_1sd": 3809.21, "sell_1sd": 3904.79,
                 "range_2sd": 95.58, "buy_2sd": 3761.42, "sell_2sd": 3952.58,
-                "range_3sd": 143.37, "buy_3sd": 3713.63, "sell_3sd": 4000.37,
+                "range_3sd": 143.38, "buy_3sd": 3713.62, "sell_3sd": 4000.38,
             },
         )
     else:
@@ -2001,15 +2139,20 @@ def run_once():
         )
         print(
             f"✅ ดึงตาราง SD·diff & รอบปัจจุบันสำเร็จ: {snap.contract_name} ({snap.round_str}) | "
-            f"OpenFut {snap.daily_open_fut:.2f} | NowFut {snap.futures_price:.1f} | Diff {snap.diff:.2f}"
+            f"OpenFut {snap.daily_open_fut:.2f} | RoundFut {snap.futures_price:.1f} | LatestFut {snap.latest_gc_fut} | Diff {snap.diff:.2f}"
         )
 
-    exact_calc = compute_exact_coordinates(snap, prev_state)
+    # 1. ดึงราคา Spot XAU/USD สดจาก TradingView API (ถ้ามี) และแคป [ภาพที่ 4] พร้อมซิงค์ราคาปิดจริงจากกราฟ TradingView 100%
+    ref_spot_est = round((snap.latest_gc_fut or snap.futures_price) - snap.diff, 2)
+    api_live_spot = None if CONFIG["DRY_RUN"] else fetch_realtime_xauusd_spot(ref_spot_est)
+    exact_calc, spot_chart_item = render_xauusd_spot_chart_and_sync_price(
+        snap, prev_state, initial_live_spot=api_live_spot
+    )
     tb = exact_calc["sd_table_exact"]
     mvc = exact_calc["morning_vs_current"]
 
+    # 2. ส่งภาพทั้ง 4 ภาพเข้า Telegram (โดยภาพที่ 4 และข้อความรายงานใช้ราคา Spot XAU/USD ตัวเดียวกันเป๊ะ 100%)
     if not CONFIG["DRY_RUN"] and cap is not None:
-        spot_chart_item = render_xauusd_spot_chart_and_ladder(snap, exact_calc)
         photos_to_send = list(cap.get("photo_captions", []))
         if spot_chart_item:
             photos_to_send.append(spot_chart_item)
@@ -2028,7 +2171,7 @@ def run_once():
     current_round_entry = {
         "time": datetime.now().strftime("%H:%M"),
         "round_str": snap.round_str,
-        "fut": snap.futures_price,
+        "fut": exact_calc["implied_live_fut"],
         "spot": exact_calc["spot"],
         "delta_from_open": mvc["delta_px_from_open"],
         "z_sd": mvc["z_from_open"],
@@ -2060,7 +2203,7 @@ def run_once():
         "buy_1sd": tb["buy_1sd"], "sell_1sd": tb["sell_1sd"],
         "buy_2sd": tb["buy_2sd"], "sell_2sd": tb["sell_2sd"],
         "buy_3sd": tb["buy_3sd"], "sell_3sd": tb["sell_3sd"],
-        "futures_price": snap.futures_price,
+        "futures_price": exact_calc["implied_live_fut"],
         "spot_price": exact_calc["spot"],
         "diff": snap.diff,
         "atm_iv": snap.atm_iv,
@@ -2072,7 +2215,7 @@ def run_once():
         "max_pain": snap.max_pain,
         "round_history": round_history,
     })
-    print("🎉 ส่งรูปกราฟ 4 ภาพ (รวมกราฟ Spot XAU/USD) และรายงานที่ตรวจสมการ TP/SL ครบ 100% เข้า Telegram เสร็จสมบูรณ์!")
+    print("🎉 ส่งรูปกราฟ 4 ภาพ (ราคา Spot ซิงค์ตรงกับข้อความ 100%) และรายงานที่ตรวจสมการ TP/SL ครบ 100% เข้า Telegram เสร็จสมบูรณ์!")
 
 
 def start_scheduler():
