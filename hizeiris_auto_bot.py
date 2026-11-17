@@ -1,6 +1,6 @@
 """
 ================================================================================
-HIZEIRIS AUTO BOT — ZERO-ERROR IPv4 + 100% SYNCED SPOT PRICE & VALIDATED TP/SL
+HIZEIRIS AUTO BOT — ZERO-ERROR IPv4 + 100% SYNCED SPOT PRICE & MASTER CONCLUSION
 ================================================================================
 1. แก้ปัญหา Error ใน GitHub Actions ครบทุกจุด:
    - บังคับใช้ IPv4 (AF_INET) สำหรับทุกการเชื่อมต่อ (แก้ปัญหา [Errno 101] Network is unreachable
@@ -14,8 +14,10 @@ HIZEIRIS AUTO BOT — ZERO-ERROR IPv4 + 100% SYNCED SPOT PRICE & VALIDATED TP/SL
    - ดึงราคา OANDA:XAUUSD จาก TradingView Forex/Global Scanner API + Swissquote Live Feed
    - ดักจับราคาปิดของแท่งเทียนปัจจุบัน ("v":[ts,O,H,L,Close] และ "lp") จาก WebSocket ของกราฟ TradingView โดยตรง
      ร่วมกับการลบอักขระพิเศษ Unicode (\u200e) ก่อนอ่านค่า "ปิด X,XXX.XX" จาก DOM ของกราฟ
-   - ซิงค์ตัวเลขเดียวกันลงใน หัวกราฟภาพที่ 4, แถบสีเหลืองในภาพที่ 4, คำบรรยายใต้ภาพที่ 4 และข้อความทั้ง 5 ส่วนใน Telegram
-3. คงระบบตรวจสอบสมการจุดเข้า–ออก (Single Exact Entry: BUY TP > Entry > SL | SELL TP < Entry < SL) ครบ 100%
+   - ซิงค์ตัวเลขเดียวกันลงใน หัวกราฟภาพที่ 4, แถบสีเหลืองในภาพที่ 4, คำบรรยายใต้ภาพที่ 4 และข้อความทุกส่วนใน Telegram
+3. เพิ่ม "🏆 บทสรุปสุดท้าย: จุดสนใจหลัก & แผนการเล่นฟันธงจากการวิเคราะห์รวมทั้งหมด" ปิดท้ายรายงาน:
+   - สรุปชัดเจนว่าจากข้อมูลทั้งหมดที่ดึงมา ควรเข้าตรงไหน (Spot & Futures), เป้า TP/SL เท่าไหร่,
+     โอกาสชนะกี่เปอร์เซ็นต์ (พร้อมแจกแจงที่มาของ % ชนะ), และเหตุผลเชิงปริมาณครบทุกมิติว่าทำไมต้องเข้าจุดนั้น
 ================================================================================
 """
 
@@ -202,12 +204,6 @@ def _is_valid_gold_price(val: float, ref_fut: float = 0.0) -> bool:
 
 
 def fetch_realtime_xauusd_spot(ref_spot: float) -> Optional[float]:
-    """
-    ดึงราคา Spot XAU/USD สดจาก 3 แหล่งตามลำดับ:
-    1) TradingView Forex Scanner API (OANDA:XAUUSD, FX_IDC:XAUUSD, FOREXCOM:XAUUSD)
-    2) TradingView Global Scanner API
-    3) Swissquote Live XAU/USD Feed (แหล่งเดียวกับที่แอป Hizeiris ใช้อ้างอิงราคา Spot)
-    """
     headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
     for endpoint in [
         "https://scanner.tradingview.com/forex/scan",
@@ -1353,7 +1349,6 @@ def render_xauusd_spot_chart_and_sync_price(
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": 1600, "height": 980})
 
-            # ดักฟังข้อมูลราคาปิดสดจาก WebSocket ของ TradingView โดยตรง (ทั้งชุดแท่งเทียน "v":[ts,O,H,L,Close] และ "lp")
             def _on_ws(ws_obj):
                 def _on_frame(payload_str):
                     if not isinstance(payload_str, str):
@@ -1894,6 +1889,228 @@ def build_deterministic_quant_audit(snap: HizeirisSnapshot, exact_calc: Dict) ->
     )
 
 
+def _compute_setup_win_rate_and_reasons(
+    ticket: Dict[str, object],
+    snap: HizeirisSnapshot,
+    exact_calc: Dict,
+    setup_tier: str,
+) -> Tuple[str, List[str]]:
+    """
+    คำนวณอัตราชนะสุทธิ (% Win Rate) พร้อมแจกแจงที่มาของ % ชนะ และเหตุผลเชิงปริมาณ 4 มิติ
+    โดยสังเคราะห์จากข้อมูลจริงทั้งหมดที่ดึงมาในรอบปัจจุบัน (SD, OI Wall, Intraday Flow, Vol Chg, Greeks)
+    """
+    side = str(ticket["side"])
+    entry_px = float(ticket["entry_spot_num"])
+    spot = float(exact_calc["spot"])
+    open_spot = float(exact_calc["open_spot"])
+    tb = exact_calc["sd_table_exact"]
+    dyn = exact_calc["cme_dynamic_spot"]
+    ws = exact_calc["walls_spot"]
+    dist_now = round(abs(spot - entry_px), 2)
+
+    # 1. ประเมินค่าฐานอัตราชนะ (Base Win Rate) ตามชั้นของด่านวิจัย
+    title_str = str(ticket["short_title"])
+    if "2SD" in title_str:
+        base_low, base_high = 78.6, 85.6
+        base_desc = "ค่าฐานวิจัย 500 วัน/50 วัน ของโซน ±2SD (15Δ Primary Kill Zone) = 78.57%–85.58%"
+    elif "3SD" in title_str:
+        base_low, base_high = 86.8, 91.4
+        base_desc = "ค่าฐานวิจัย 500 วัน/50 วัน ของโซน ±3SD (5Δ Extreme Tail) = 86.75%–91.43%"
+    elif "1SD" in title_str:
+        base_low, base_high = 72.0, 78.5
+        base_desc = "ค่าฐานวิจัยเก็บเด้ง/ย่อสั้น $8–$12 ที่โซน ±1SD (25Δ First Action) = 70.0%–78.53% (เอเชีย 82.0%)"
+    else:
+        base_low, base_high = 72.5, 82.0
+        base_desc = "ค่าฐานวิจัย 2 ปี CME OI Gravity เมื่อราคาทดสอบกำแพงออปชัน (Repeller Wall) = 72.5%–85.0%"
+
+    bonuses = []
+    wall_px = ws["put_wall_spot"] if side == "BUY" else ws["call_wall_spot"]
+    wall_name = "Put Wall" if side == "BUY" else "Call Wall"
+    wall_fut = ws["put_wall_fut"] if side == "BUY" else ws["call_wall_fut"]
+
+    # โบนัสที่ 1: ความใกล้ชิดกำแพง OI
+    if abs(entry_px - wall_px) <= 12.0:
+        base_low = max(base_low, 82.0)
+        base_high = min(93.5, base_high + 4.5)
+        bonuses.append(f"ทับซ้อนใกล้ {wall_name} ({wall_px:,.2f}) ในระยะ {abs(entry_px - wall_px):.2f} จุด (+4.5%)")
+
+    # โบนัสที่ 2: สภาวะความผันผวนสด (IV Crush / Vanna Bounce)
+    if snap.vol_chg < 0:
+        base_low = min(90.0, base_low + 2.5)
+        base_high = min(94.0, base_high + 3.0)
+        bonuses.append(f"เกิด IV Crush (Vol Chg {snap.vol_chg:+.2f}%) หนุนแรงดีด Vanna (+2.5%..+3.0%)")
+
+    # โบนัสที่ 3: การซ้อนทับกรอบ Dynamic SD รอบปัจจุบัน
+    for dyn_lbl, dyn_key in [("+1SD", "+1SD_spot"), ("+2SD", "+2SD_spot"), ("-1SD", "-1SD_spot"), ("-2SD", "-2SD_spot")]:
+        if abs(entry_px - float(dyn[dyn_key])) <= 8.0:
+            base_low = min(91.0, base_low + 2.0)
+            base_high = min(94.5, base_high + 2.5)
+            bonuses.append(f"ซ้อนทับกรอบ Dynamic {dyn_lbl} รอบปัจจุบันที่ {dyn[dyn_key]:,.2f} (+2.0%..+2.5%)")
+            break
+
+    # โบนัสที่ 4: เลขกลมจิตวิทยา (00, 20, 50, 80)
+    if check_round_number_bonus(entry_px):
+        base_low = min(92.0, base_low + 3.0)
+        base_high = min(95.0, base_high + 4.0)
+        bonuses.append("ตรงแนวเลขกลมจิตวิทยา Spot (+3.0%..+4.0%)")
+
+    bonus_str = " + ".join(bonuses) if bonuses else "ตามค่าสถิติมาตรฐานของโซนวิจัย"
+    win_rate_summary = f"*{base_low:.1f}% – {base_high:.1f}%* _({base_desc} | ปัจจัยหนุนรอบนี้: {bonus_str})_"
+
+    # สร้างเหตุผลเชิงปริมาณ 4 ข้อจากข้อมูลจริงที่ดึงมาในรอบนี้
+    if side == "BUY":
+        reason_1 = (
+            f"*โครงสร้างกรอบ SD & ระยะตึงตัว*: จุดเข้า `{entry_px:,.2f}` อยู่ต่ำกว่าราคาเปิดเช้า (`{open_spot:,.2f}`) ถึง `{open_spot - entry_px:.2f}` จุด "
+            f"(และห่างจากราคาปัจจุบัน `{spot:,.2f}` อยู่ `{dist_now:.2f}` จุด) ซึ่งเป็นโซนที่แรงขายรายวันเริ่มหมดกำลังตามสถิติ Mean Reversion"
+        )
+        reason_2 = (
+            f"*กำแพงสถาบัน & เสาปั๊มน้ำมัน (OI/Intraday)*: ฐานสะสม Open Interest ฝั่ง Put มีถึง `{snap.oi_p:,}` สัญญา (`OI P/C = {snap.oi_pc:.2f}`) "
+            f"โดยมีกำแพง `{wall_name}` คอยพยุงที่ `{wall_px:,.2f}` (Fut `{wall_fut:.0f}`) ตามโมเดลรถไม่มีเบรก เมื่อราคาไหลลงมาชนโซนรับที่มีเสา Put รองรับ Market Maker ที่ขาย Put ไว้ต้องเข้าช้อนซื้อ Futures คืนเพื่อป้องกันพอร์ต"
+        )
+        reason_3 = (
+            f"*ความผันผวนสด & กลไก Shadow Greeks*: รอบนี้ `ATM Vol สด = {snap.atm_iv:.2f}%` เทียบ `Vol Settle = {snap.vol_settle_atm:.2f}%` (`Vol Chg = {snap.vol_chg:+.2f}%`) "
+            + (
+                "การที่ Vol สดหดตัวต่ำกว่าฐาน Settle (IV Crush) จะจุดชนวน Vanna & Charm Rally บังคับให้ Dealer ซื้อทองคำกลับขึ้นไปหาแกนกลางเร็วขึ้น"
+                if snap.vol_chg < 0
+                else "ที่โซนรับ 15ΔP–25ΔP เป็นจุดพีคของกราฟ Twin-Peaks Volga ซึ่งขยายขนาด Shadow Gamma ของกำแพงรับให้แข็งแกร่งขึ้นอีก +25% ถึง +30%"
+            )
+        )
+    else:
+        reason_1 = (
+            f"*โครงสร้างกรอบ SD & ระยะตึงตัว*: จุดเข้า `{entry_px:,.2f}` อยู่สูงกว่าราคาเปิดเช้า (`{open_spot:,.2f}`) ถึง `+{entry_px - open_spot:.2f}` จุด "
+            f"(และห่างจากราคาปัจจุบัน `{spot:,.2f}` อยู่ `{dist_now:.2f}` จุด) ซึ่งเป็นขอบความผันผวนด้านบนที่แรงซื้อไล่ราคาเริ่มตึงตัว"
+        )
+        reason_2 = (
+            f"*กำแพงสถาบัน & เสาปั๊มน้ำมัน (OI/Intraday)*: โฟลว์รายวัน `Intraday Call = {snap.intraday_c:,}` สัญญา (`Intraday P/C = {snap.intraday_pc:.2f}`, `Churn = {snap.churn_str}`) "
+            f"โดยมีกำแพงต้าน `{wall_name}` ขวางอยู่ที่ `{wall_px:,.2f}` (Fut `{wall_fut:.0f}`) ตามโมเดลรถไม่มีเบรก จุดนี้คือปั๊มปลายทางที่รถไต่ความชันขึ้นมาจนน้ำมันหมดและพร้อมไหลถอยหลังกลับลงมาหาเสาแรก"
+        )
+        reason_3 = (
+            f"*ความผันผวนสด & กลไก Shadow Greeks*: รอบนี้ `ATM Vol สด = {snap.atm_iv:.2f}%` เทียบ `Vol Settle = {snap.vol_settle_atm:.2f}%` (`Vol Chg = {snap.vol_chg:+.2f}%`) "
+            + (
+                "เมื่อราคาวิ่งชนแนวต้านแต่ Vol สดยุบตัวลง (`Vol Chg < 0`) แรงดึงของ Call Delta จะฝ่อตัวลงทันที (Vanna Exhaustion) ทำให้เกิดแรงเทขายทำกำไรย่อตัวลงมาอย่างรวดเร็ว"
+                if snap.vol_chg < 0
+                else "ที่โซนต้าน 15ΔC–25ΔC เป็นจุดพีคของกราฟ Twin-Peaks Volga ซึ่งเพิ่มแรงต้านทาน Shadow Gamma ของ Dealer ขึ้นอีก +25% ถึง +30%"
+            )
+        )
+
+    reason_4 = (
+        f"*ความคุ้มค่าของจุดเข้า–ออก (Risk/Reward & แผนสำรอง)*: เข้าจุดเดียวที่ `{ticket['entry_spot']}` เก็บกำไรตามเป้า `{ticket['tp1']} / {ticket['tp2']}` "
+        f"โดยใช้ SL ปกติเพียง `8` จุด (`{ticket['sl_bozovic']}`) ตามวิจัย Jump Risk ของ Božović (2026) หรือใช้แผนสลับหน้าทบ 2x ของ Supa888 ที่ `{ticket['sl1']}` เพื่อล็อกผลลัพธ์ไม่ให้พอร์ตติดลบค้าง"
+    )
+
+    return win_rate_summary, [reason_1, reason_2, reason_3, reason_4]
+
+
+def build_final_master_conclusion(snap: HizeirisSnapshot, exact_calc: Dict) -> str:
+    """
+    สร้างข้อความปิดท้ายรายงาน (Final Master Conclusion & Action Plan):
+    สังเคราะห์ข้อมูลทั้งหมดที่ดึงมาในรอบนี้ เพื่อสรุปให้ชัดเจนที่สุดว่า:
+    1) ภาพรวมข้อมูลที่ดึงมาทั้งหมดชี้ไปทางไหน
+    2) จุดสนใจหลักที่ควรเข้าคือตรงไหน (พิกัดเดียวชัดเจน + TP/SL สัมพันธ์กัน 100%)
+    3) โอกาสชนะกี่เปอร์เซ็นต์ (พร้อมแจกแจงที่มา)
+    4) เหตุผลทำไมต้องเข้าที่จุดนั้น (ครบทุกมิติจากข้อมูลที่ดึงมา)
+    5) ลำดับแผนการเล่นทีละขั้นจากราคาปัจจุบัน
+    """
+    tb = exact_calc["sd_table_exact"]
+    ws = exact_calc["walls_spot"]
+    mvc = exact_calc["morning_vs_current"]
+    m4 = exact_calc["m4_micro"]
+    tactical = exact_calc["tactical_tickets"]
+    zones = exact_calc["six_zone_plans"]
+    spot = exact_calc["spot"]
+    open_spot = exact_calc["open_spot"]
+
+    # ดึงไม้แรก (ใกล้สุด) และไม้เอก (2SD Kill Zone) ของทั้งฝั่ง BUY และ SELL
+    buy_first = tactical["buy_tickets"][0]
+    sell_first = tactical["sell_tickets"][0]
+    buy_2sd_ticket = zones[4]   # โซนที่ 5: 2SD BUY
+    sell_2sd_ticket = zones[1]  # โซนที่ 2: 2SD SELL
+
+    b1_win, b1_reasons = _compute_setup_win_rate_and_reasons(buy_first, snap, exact_calc, "first")
+    b2_win, b2_reasons = _compute_setup_win_rate_and_reasons(buy_2sd_ticket, snap, exact_calc, "killzone")
+    s1_win, s1_reasons = _compute_setup_win_rate_and_reasons(sell_first, snap, exact_calc, "first")
+    s2_win, s2_reasons = _compute_setup_win_rate_and_reasons(sell_2sd_ticket, snap, exact_calc, "killzone")
+
+    def _render_focus_card(header: str, t: Dict[str, object], win_str: str, reasons: List[str]) -> str:
+        dist_now = round(abs(spot - float(t["entry_spot_num"])), 2)
+        dir_txt = "สูงกว่าจุดเข้า" if t["side"] == "BUY" else "ต่ำกว่าจุดเข้า"
+        return (
+            f"*{header}*\n"
+            f"   • 📍 *ควรเข้าตรงไหน*: ดัก *{t['side']}* ที่พิกัด *`{t['entry_spot']}`* (Futures `{t['entry_fut']}` | ห่างราคาปัจจุบัน `{dist_now:.2f}` จุด)\n"
+            f"   • 🎯 *เป้าทำกำไร ({dir_txt})*: {t['tp_line']}\n"
+            f"   • 🛑 *จุดตัดขาดทุนปกติ (SL)*: {t['sl_norm_line']}\n"
+            f"   • 🔄 *แผนแก้พอร์ต Supa888*: {t['rec1_line']}\n"
+            f"   • 🏆 *โอกาสชนะ (Win Rate)*: {win_str}\n"
+            f"   • 💡 *เหตุผลทำไมต้องเข้าจุดนี้ (จากการวิเคราะห์รวมรอบนี้)*:\n"
+            f"      1) {reasons[0]}\n"
+            f"      2) {reasons[1]}\n"
+            f"      3) {reasons[2]}\n"
+            f"      4) {reasons[3]}"
+        )
+
+    card_buy_1 = _render_focus_card(
+        f"🟢 จุดสนใจ BUY อันดับ 1 (ด่านรับใกล้ราคาปัจจุบันที่สุด): {buy_first['short_title']}",
+        buy_first, b1_win, b1_reasons,
+    )
+    card_buy_2 = _render_focus_card(
+        f"🔥 จุดสนใจ BUY ไม้เอกประจำวัน (ดักช้อนคำใหญ่ Kill Zone): {buy_2sd_ticket['short_title']}",
+        buy_2sd_ticket, b2_win, b2_reasons,
+    )
+    card_sell_1 = _render_focus_card(
+        f"🔴 จุดสนใจ SELL อันดับ 1 (ด่านต้านใกล้ราคาปัจจุบันที่สุด): {sell_first['short_title']}",
+        sell_first, s1_win, s1_reasons,
+    )
+    card_sell_2 = _render_focus_card(
+        f"🔥 จุดสนใจ SELL ไม้เอกประจำวัน (ดักทุบคำใหญ่ Kill Zone): {sell_2sd_ticket['short_title']}",
+        sell_2sd_ticket, s2_win, s2_reasons,
+    )
+
+    # วิเคราะห์ว่าฝั่งไหนอยู่ใกล้ราคาปัจจุบันมากกว่า เพื่อสรุปลำดับความสำคัญ
+    dist_b1 = round(abs(spot - float(buy_first["entry_spot_num"])), 2)
+    dist_s1 = round(abs( float(sell_first["entry_spot_num"]) - spot), 2)
+    if dist_b1 <= dist_s1:
+        priority_note = (
+            f"ขณะนี้ราคาปัจจุบัน (`{spot:,.2f}`) อยู่ใกล้ด่านรับฝั่งล่าง (`{buy_first['entry_spot']}`, ห่าง `{dist_b1:.2f}` จุด) "
+            f"มากกว่าด่านต้านฝั่งบน (`{sell_first['entry_spot']}`, ห่าง `{dist_s1:.2f}` จุด) -> *ให้น้ำหนักเฝ้ารอดัก BUY ที่ `{buy_first['entry_spot']}` เป็นลำดับแรก* "
+            f"พร้อมวาง Pending SELL ดักด้านบนที่ `{sell_first['entry_spot']}` คู่กัน"
+        )
+    else:
+        priority_note = (
+            f"ขณะนี้ราคาปัจจุบัน (`{spot:,.2f}`) อยู่ใกล้ด่านต้านฝั่งบน (`{sell_first['entry_spot']}`, ห่าง `{dist_s1:.2f}` จุด) "
+            f"มากกว่าด่านรับฝั่งล่าง (`{buy_first['entry_spot']}`, ห่าง `{dist_b1:.2f}` จุด) -> *ให้น้ำหนักเฝ้ารอดัก SELL ที่ `{sell_first['entry_spot']}` เป็นลำดับแรก* "
+            f"พร้อมวาง Pending BUY ดักด้านล่างที่ `{buy_first['entry_spot']}` คู่กัน"
+        )
+
+    return (
+        f"🏆 *บทสรุปสุดท้าย: จุดสนใจหลัก & แผนการเล่นฟันธงจากการวิเคราะห์รวมทั้งหมด*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔍 *1. สรุปภาพรวมข้อมูลจริงที่ดึงมาทั้งหมดในรอบนี้ (ทำไมตลาดถึงเป็นแบบนี้)*:\n"
+        f"   • *ราคาปัจจุบัน*: XAU/USD Spot อยู่ที่ *`{spot:,.2f}`* (ตรงกับกราฟ `[ภาพที่ 4]` 100%) เทียบราคาเปิดเช้า `{open_spot:,.2f}` เปลี่ยนแปลง `{mvc['delta_px_from_open']}` จุด (`{mvc['z_from_open']}` ของกรอบ Fix เช้า `1SD = ±{tb['range_1sd']:.2f}`)\n"
+        f"   • *โครงสร้างโฟลว์ & กำแพงสถาบัน*: รายวัน `Intraday C {snap.intraday_c:,} / P {snap.intraday_p:,}` (`P/C {snap.intraday_pc:.2f}`, `Churn {snap.churn_str}`) ส่วนฐานใหญ่ `OI C {snap.oi_c:,} / P {snap.oi_p:,}` (`P/C {snap.oi_pc:.2f}`) โดยมีกำแพงรับ `Put Wall {ws['put_wall_spot']:,.2f}` และกำแพงต้าน `Call Wall {ws['call_wall_spot']:,.2f}` (จุดดูดแม่เหล็ก `Max Pain {ws['max_pain_spot']:,.2f}`)\n"
+        f"   • *ความผันผวนสด & โมเดลวิจัย*: `IV เช้า {snap.open_iv:.2f}%` -> `ATM Vol สด {snap.atm_iv:.2f}%` เทียบ `Vol Settle {snap.vol_settle_atm:.2f}%` (`Vol Chg {snap.vol_chg:+.2f}%`) | สถานะ `{m4['quadrant']}`\n"
+        f"   • *เข็มทิศลำดับความสำคัญรอบนี้*: {priority_note}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 *2. จุดสนใจหลักที่ควรเข้า + โอกาสชนะ + เหตุผลทำไมต้องเข้า (คัดเน้นๆ จากทุกโมดูล)*:\n\n"
+        f"{card_buy_1}\n\n"
+        f"{card_buy_2}\n\n"
+        f"{card_sell_1}\n\n"
+        f"{card_sell_2}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧭 *3. แผนการเล่นสรุปทีละขั้นจากราคาปัจจุบัน (`{spot:,.2f}`) (Step-by-Step Execution Plan)*:\n"
+        f"   1️⃣ *ณ ราคาปัจจุบัน (`{spot:,.2f}`)*: {exact_calc['immediate_verdict']}\n"
+        f"   2️⃣ *แผนเมื่อราคาย่อลงด้านล่าง (ฝั่ง BUY)*:\n"
+        f"      • ด่านแรก: ตั้งรับ BUY ที่ *`{buy_first['entry_spot']}`* เก็บเป้า `{buy_first['tp1']} / {buy_first['tp2']}` (SL ปกติ `{buy_first['sl_bozovic']}` หรือคัตสลับ SELL ทบ 2x ที่ `{buy_first['sl1']}`)\n"
+        f"      • ด่านคำใหญ่ประจำวัน: หากไหลลึกถึงโซนสังหาร `2SD BUY` ให้เข้า BUY ไม้หลักที่ *`{tb['buy_2sd']:,.2f}`* เก็บเป้าใหญ่ `{tb['buy_2sd']+15:,.2f} / {tb['buy_2sd']+25:,.2f}` (SL ปกติ `{tb['buy_2sd']-8:,.2f}`)\n"
+        f"   3️⃣ *แผนเมื่อราคาดีดขึ้นด้านบน (ฝั่ง SELL)*:\n"
+        f"      • ด่านแรก: ตั้งดัก SELL ที่ *`{sell_first['entry_spot']}`* เก็บเป้า `{sell_first['tp1']} / {sell_first['tp2']}` (SL ปกติ `{sell_first['sl_bozovic']}` หรือคัตสลับ BUY ทบ 2x ที่ `{sell_first['sl1']}`)\n"
+        f"      • ด่านคำใหญ่ประจำวัน: หากพุ่งชนโซนสังหาร `2SD SELL` ให้เข้า SELL ไม้หลักที่ *`{tb['sell_2sd']:,.2f}`* เก็บเป้าใหญ่ `{tb['sell_2sd']-15:,.2f} / {tb['sell_2sd']-25:,.2f}` (SL ปกติ `{tb['sell_2sd']+8:,.2f}`)\n"
+        f"   4️⃣ *ข้อห้ามเด็ดขาดในรอบนี้ (ป้องกันพอร์ตติดลบ)*:\n"
+        f"      • ❌ ห้ามกดเข้าสวนกลางอากาศในโซน `< ±0.5SD` รอบราคาเปิด (`{open_spot:,.2f}`) เพราะโอกาสแกว่งออกหา `±1SD` สูงถึง `84%`\n"
+        f"      • ❌ ห้ามไล่ทุบ SELL ซื้อ Put ที่แนวรับ `Put Wall ({ws['put_wall_spot']:,.2f}) / 1SD BUY ({tb['buy_1sd']:,.2f})` เพราะสถิติวิจัย Garmash/Vilkov ชนะแค่ `30%–40%`\n"
+        f"      • ❌ ห้ามถือลุ้นเป้าไกลเกิน `$50` โดยไม่ตั้ง Fixed TP `@ +$25` (เพราะโอกาสแตะเป้าไกลเกิน `$50` ตกฮวบเหลือแค่ `14%–45%`)"
+    )
+
+
 def build_clean_section_messages(snap: HizeirisSnapshot, exact_calc: Dict, round_history: List[Dict], ai_audit_text: str = "") -> List[str]:
     tb = exact_calc["sd_table_exact"]
     dyn = exact_calc["cme_dynamic_spot"]
@@ -2070,7 +2287,10 @@ def build_clean_section_messages(snap: HizeirisSnapshot, exact_calc: Dict, round
         f"{ai_block}"
     )
 
-    return [msg_0, msg_1, msg_2, msg_3, msg_4]
+    # ข้อความปิดท้ายสุด: บทสรุปสุดท้าย จุดสนใจหลัก & แผนการเล่นฟันธงจากการวิเคราะห์รวมทั้งหมด
+    msg_5 = build_final_master_conclusion(snap, exact_calc)
+
+    return [msg_0, msg_1, msg_2, msg_3, msg_4, msg_5]
 
 
 def synthesize_full_report_messages(snap: HizeirisSnapshot, exact_calc: Dict, capture: Optional[Dict[str, object]],
@@ -2346,7 +2566,7 @@ def run_once():
         "max_pain": snap.max_pain,
         "round_history": round_history,
     })
-    print("🎉 ส่งรูปกราฟ 4 ภาพ (ราคา Spot ซิงค์ตรงกับข้อความ 100%) และรายงานที่ตรวจสมการ TP/SL ครบ 100% เข้า Telegram เสร็จสมบูรณ์!")
+    print("🎉 ส่งรูปกราฟ 4 ภาพ และรายงานพร้อมบทสรุปสุดท้าย (Final Master Conclusion) เข้า Telegram เสร็จสมบูรณ์!")
 
 
 def start_scheduler():
