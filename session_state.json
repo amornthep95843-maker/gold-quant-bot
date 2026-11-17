@@ -1,7 +1,12 @@
 {
   "trading_day": "2026-11-17",
+<<<<<<< Updated upstream
   "timestamp": "2026-11-17 13:00",
   "round_str": "รอบล่าสุด",
+=======
+  "timestamp": "2026-11-17 13:02",
+  "round_str": "รอบ 139/139",
+>>>>>>> Stashed changes
   "daily_open_fut": 3859.5,
   "daily_open_spot": 3857.0,
   "open_iv": 26.45,
@@ -11,6 +16,7 @@
   "sell_1sd": 3904.79,
   "buy_2sd": 3761.42,
   "sell_2sd": 3952.58,
+<<<<<<< Updated upstream
   "buy_3sd": 3713.63,
   "sell_3sd": 4000.37,
   "futures_price": 3864.8,
@@ -20,6 +26,17 @@
   "vol_settle_atm": 17.3,
   "intraday_c": 634,
   "intraday_p": 370,
+=======
+  "buy_3sd": 3713.62,
+  "sell_3sd": 4000.38,
+  "futures_price": 3861.2,
+  "spot_price": 3858.7,
+  "diff": 2.5,
+  "atm_iv": 30.8,
+  "vol_settle_atm": 29.77,
+  "intraday_c": 916,
+  "intraday_p": 433,
+>>>>>>> Stashed changes
   "put_wall": 3850.0,
   "call_wall": 3920.0,
   "max_pain": 3860.0,
@@ -161,6 +178,7 @@
       "call_wall": 3900.0
     },
     {
+<<<<<<< Updated upstream
       "time": "13:00",
       "round_str": "รอบล่าสุด",
       "fut": 3864.8,
@@ -176,6 +194,23 @@
       "oi_p": 1058,
       "put_wall": 3850.0,
       "call_wall": 3920.0
+=======
+      "time": "13:02",
+      "round_str": "รอบ 139/139",
+      "fut": 3861.2,
+      "spot": 3858.7,
+      "delta_from_open": "+1.70",
+      "z_sd": "+0.04SD",
+      "atm_iv": 30.8,
+      "vol_chg": 1.03,
+      "intra_c": 916,
+      "intra_p": 433,
+      "intra_pc": 0.47,
+      "oi_c": 781,
+      "oi_p": 778,
+      "put_wall": 3850.0,
+      "call_wall": 3900.0
+>>>>>>> Stashed changes
     }
   ]
 }
