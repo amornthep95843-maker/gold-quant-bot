@@ -1,6 +1,10 @@
 {
   "trading_day": "2026-11-18",
+<<<<<<< Updated upstream
   "timestamp": "2026-11-18 06:00",
+=======
+  "timestamp": "2026-11-18 06:02",
+>>>>>>> Stashed changes
   "round_str": "รอบ 80/80",
   "daily_open_fut": 3859.5,
   "daily_open_spot": 3857.0,
@@ -59,6 +63,7 @@
       "call_wall": 3935.0
     },
     {
+<<<<<<< Updated upstream
       "time": "05:00",
       "round_str": "รอบ 80/80",
       "fut": 3851.71,
@@ -94,6 +99,9 @@
     },
     {
       "time": "06:00",
+=======
+      "time": "06:02",
+>>>>>>> Stashed changes
       "round_str": "รอบ 80/80",
       "fut": 3851.71,
       "spot": 3849.21,
