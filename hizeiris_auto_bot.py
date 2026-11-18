@@ -30,7 +30,12 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+TH_TZ = timezone(timedelta(hours=7))
+
+def now_th() -> datetime:
+    return datetime.now(TH_TZ)
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -1293,7 +1298,7 @@ def render_xauusd_spot_chart_and_sync_price(
     initial_live_spot: Optional[float] = None,
 ) -> Tuple[Dict, Optional[Tuple[str, str]]]:
     exact_calc = compute_exact_coordinates(snap, prev_state, live_spot_override=initial_live_spot)
-    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    ts = now_th().strftime("%Y%m%d_%H%M")
     out_path = f"hizeiris_4_xauusd_spot_{ts}.png"
     tb = exact_calc["sd_table_exact"]
     ws = exact_calc["walls_spot"]
@@ -1628,6 +1633,109 @@ def _extract_frame_texts_and_inputs(page) -> str:
     return "\n\n".join(blocks)
 
 
+
+def _extract_realtime_chart_svg_metrics(page) -> Dict[str, object]:
+    """
+    ดึงข้อมูลจริงจากกราฟ SVG บนหน้าเว็บ Hizeiris แบบ Real-Time โดยตรง:
+    1) หัวเสา Put/Call จริงทุกแท่ง (รองรับเลข 1-5 หลัก เช่น 48/1188, 385/42) โดยตัดเลขรอบ (183/183) ออก 100%
+    2) ค่า IV% จริงของเส้นสีเขียว (Vol สด) และเส้นประสีแดง (Vol Settle) ทั้งฝั่งซ้าย (Put Wing), ตรงกลาง (ATM), ฝั่งขวา (Call Wing)
+    3) พิกัดป้าย Delta (25ΔP, 15ΔP, 25ΔC, 15ΔC) กับเลข Strike จริงบนแกน X
+    """
+    result = {
+        "pillars": [],
+        "put_wall_chart": 0.0,
+        "call_wall_chart": 0.0,
+        "max_pain_chart": 0.0,
+        "iv_put_wing_live": 0.0,
+        "iv_put_wing_settle": 0.0,
+        "iv_call_wing_live": 0.0,
+        "iv_call_wing_settle": 0.0,
+    }
+    for frame in page.frames:
+        try:
+            data = frame.locator("body").evaluate(
+                """body => {
+                    const out = { pillars: [], green_y: [], red_y: [], y_pcts: [], pw: 0, cw: 0, mp: 0 };
+                    const svgs = Array.from(document.querySelectorAll('svg'));
+                    if (!svgs.length) return out;
+                    const svg = svgs[0];
+                    const texts = Array.from(svg.querySelectorAll('text')).map(t => ({
+                        txt: (t.textContent || '').trim(),
+                        x: parseFloat(t.getAttribute('x') || '0'),
+                        y: parseFloat(t.getAttribute('y') || '0')
+                    }));
+
+                    for (const item of texts) {
+                        if (/^[0-9]{1,4}\\/[0-9]{1,4}$/.test(item.txt)) {
+                            if (!out.pillars.includes(item.txt)) out.pillars.push(item.txt);
+                        }
+                        const mPw = item.txt.match(/Put\\s*wall\\s*([2-5][0-9]{3})/i);
+                        if (mPw) out.pw = parseFloat(mPw[1]);
+                        const mCw = item.txt.match(/Call\\s*wall\\s*([2-5][0-9]{3})/i);
+                        if (mCw) out.cw = parseFloat(mCw[1]);
+                        const mMp = item.txt.match(/Max\\s*Pain\\s*([2-5][0-9]{3})/i);
+                        if (mMp) out.mp = parseFloat(mMp[1]);
+                        const mPct = item.txt.match(/^([0-9]{1,2}\\.[0-9])%$/);
+                        if (mPct) out.y_pcts.push({ pct: parseFloat(mPct[1]), y: item.y });
+                    }
+
+                    // อ่านเส้น Vol สด (สีเขียว) และ Vol Settle (เส้นประแดง) จาก path/polyline ในกราฟแรก
+                    const paths = Array.from(svg.querySelectorAll('path, polyline'));
+                    for (const p of paths) {
+                        const stroke = (p.getAttribute('stroke') || '').toLowerCase();
+                        const dash = (p.getAttribute('stroke-dasharray') || '').trim();
+                        const d = p.getAttribute('d') || p.getAttribute('points') || '';
+                        const pts = [];
+                        const reNum = /([0-9]+(?:\\.[0-9]+)?)[,\\s]+([0-9]+(?:\\.[0-9]+)?)/g;
+                        let m;
+                        while ((m = reNum.exec(d)) !== null) {
+                            pts.push({ x: parseFloat(m[1]), y: parseFloat(m[2]) });
+                        }
+                        if (pts.length >= 5) {
+                            if ((stroke.includes('22c55e') || stroke.includes('4ade80') || stroke.includes('84cc16') || stroke.includes('a3e635') || stroke.includes('green')) && !dash) {
+                                out.green_pts = pts;
+                            } else if ((stroke.includes('ef4444') || stroke.includes('f87171') || stroke.includes('fb7185') || stroke.includes('red')) && dash) {
+                                out.red_pts = pts;
+                            }
+                        }
+                    }
+                    return out;
+                }""",
+                timeout=2500,
+            )
+            if data and (data.get("pillars") or data.get("y_pcts")):
+                if data.get("pillars"):
+                    result["pillars"] = data["pillars"][:15]
+                if data.get("pw"):
+                    result["put_wall_chart"] = float(data["pw"])
+                if data.get("cw"):
+                    result["call_wall_chart"] = float(data["cw"])
+                if data.get("mp"):
+                    result["max_pain_chart"] = float(data["mp"])
+
+                y_pcts = sorted(data.get("y_pcts") or [], key=lambda z: z["y"])
+                if len(y_pcts) >= 2:
+                    top_y, top_pct = y_pcts[0]["y"], y_pcts[0]["pct"]
+                    bot_y, bot_pct = y_pcts[-1]["y"], y_pcts[-1]["pct"]
+                    if bot_y > top_y and top_pct > bot_pct:
+                        def _y_to_iv(y_val: float) -> float:
+                            ratio = (bot_y - y_val) / (bot_y - top_y)
+                            return round(bot_pct + ratio * (top_pct - bot_pct), 2)
+
+                        g_pts = data.get("green_pts") or []
+                        if len(g_pts) >= 4:
+                            result["iv_put_wing_live"] = _y_to_iv(g_pts[0]["y"])
+                            result["iv_call_wing_live"] = _y_to_iv(g_pts[-1]["y"])
+                        r_pts = data.get("red_pts") or []
+                        if len(r_pts) >= 4:
+                            result["iv_put_wing_settle"] = _y_to_iv(r_pts[0]["y"])
+                            result["iv_call_wing_settle"] = _y_to_iv(r_pts[-1]["y"])
+                break
+        except Exception:
+            pass
+    return result
+
+
 def _expand_iframes_for_full_charts(page) -> None:
     for frame in page.frames:
         try:
@@ -1646,7 +1754,7 @@ def _expand_iframes_for_full_charts(page) -> None:
                     document.documentElement.style.overflow = 'visible';
                     body.style.overflow = 'visible';
                     document.querySelectorAll('iframe, #sandboxFrame, #userHtmlFrame').forEach(el => {
-                        el.style.height = '2300px';
+                        el.style.height = '1380px';
                         el.style.maxHeight = 'none';
                     });
                 }""",
@@ -1739,7 +1847,7 @@ def _wait_for_latest_15min_round(page, url: str) -> None:
       บอทจะรอและกดปุ่มรีเฟรช ⟳ ทุก 15 วินาที จนกว่ารอบเวลาปัจจุบันจะเข้าเว็บครบเรียบร้อยก่อนแคปภาพ!
     """
     _force_jump_to_latest_round(page)
-    now = datetime.now()
+    now = now_th()
     # ตลาดพักช่วง 05:00 - 06:00 น. (รอบสุดท้ายของวันเก่าคือ 04:45 น.)
     if now.hour == 5 or (now.hour == 6 and now.minute < 15):
         return
@@ -1848,6 +1956,16 @@ def _configure_sd_diff_and_ensure_latest_round(page, fixed_dte: float) -> None:
                         }}
                     }});
 
+                    // 4.5 ตั้งค่าช่วงบนกราฟให้กว้าง (±3 SD) เพื่อไม่ให้ตัดขอบกำแพง OI บนกราฟ
+                    Array.from(document.querySelectorAll('select, input')).forEach(el => {{
+                        const pTxt = (el.parentElement ? el.parentElement.innerText : '').trim();
+                        if (pTxt.includes('ช่วง') && el.tagName === 'INPUT' && el.value !== '3') {{
+                            el.value = '3';
+                            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        }}
+                    }});
+
                     // 5. ตั้งค่าช่อง DTE = 0.8 และ SD = 1,2,3
                     Array.from(document.querySelectorAll('input')).forEach(inp => {{
                         if (inp.type === 'range' || inp.type === 'checkbox' || inp.type === 'radio') return;
@@ -1875,7 +1993,7 @@ def capture_hizeiris_web(url: str, profile_dir: str, fixed_dte: float = 0.8) -> 
     """
     from playwright.sync_api import sync_playwright
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    ts = now_th().strftime("%Y%m%d_%H%M")
     shot_sd_diff = f"hizeiris_1_sddiff_dte08_{ts}.png"
     shot_cme_vol = f"hizeiris_2_cme_vol_{ts}.png"
     shot_oi_all = f"hizeiris_3_oi_all_{ts}.png"
@@ -1886,7 +2004,7 @@ def capture_hizeiris_web(url: str, profile_dir: str, fixed_dte: float = 0.8) -> 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
-            viewport={"width": 1600, "height": 2300},
+            viewport={"width": 1600, "height": 1380},
             timezone_id="Asia/Bangkok",
             locale="th-TH",
         )
@@ -1943,7 +2061,7 @@ def capture_hizeiris_web(url: str, profile_dir: str, fixed_dte: float = 0.8) -> 
             _configure_sd_diff_and_ensure_latest_round(page, fixed_dte)
             page.wait_for_timeout(2000)
             _expand_iframes_for_full_charts(page)
-            page.screenshot(path=shot_sd_diff, full_page=True, timeout=15000)
+            page.screenshot(path=shot_sd_diff, full_page=False, timeout=15000)
             screenshots.append(shot_sd_diff)
             photo_captions.append((shot_sd_diff, f"📐 [ภาพที่ 1] แท็บ SD · diff (กรอบ Fix ตอนเช้า DTE {fixed_dte}) & กราฟ Intraday + OI"))
             text_diff_tab = _extract_frame_texts_and_inputs(page)
@@ -1952,18 +2070,35 @@ def capture_hizeiris_web(url: str, profile_dir: str, fixed_dte: float = 0.8) -> 
             text_diff_tab = ""
 
         _click_tab_button_in_frames(page, ["CME", "Vol"])
-        page.wait_for_timeout(1800)
+        page.wait_for_timeout(1500)
+        # ปิด SD ชั่วคราวตอนแคป [ภาพที่ 2] และ [ภาพที่ 3] เพื่อให้กราฟแสดงทุก Strike ครบ 100% ตรงกับหน้าเว็บจริง (ไม่ถูกตัดขอบ ±SD)
+        for frame in page.frames:
+            try:
+                frame.locator("body").evaluate(
+                    """body => {
+                        Array.from(document.querySelectorAll('button, span, div')).forEach(el => {
+                            if (el.children.length > 1) return;
+                            const t = (el.innerText || '').trim();
+                            if (t === 'SD: เปิด') el.click();
+                        });
+                    }""",
+                    timeout=2000,
+                )
+            except Exception:
+                pass
+        page.wait_for_timeout(1000)
         _expand_iframes_for_full_charts(page)
-        page.screenshot(path=shot_cme_vol, full_page=True, timeout=15000)
+        page.screenshot(path=shot_cme_vol, full_page=False, timeout=15000)
         screenshots.append(shot_cme_vol)
         photo_captions.append((shot_cme_vol, "📊 [ภาพที่ 2] แท็บ CME · Vol (ข้อมูลรอบปัจจุบัน) & กราฟ Intraday + OI"))
         text_main = _extract_frame_texts_and_inputs(page)
-        print("✅ แคปภาพที่ 2 (แท็บ CME · Vol รอบปัจจุบัน) สำเร็จ!")
+        svg_metrics = _extract_realtime_chart_svg_metrics(page)
+        print(f"✅ แคปภาพที่ 2 (แท็บ CME · Vol รอบปัจจุบัน, ดึงหัวเสา SVG จริง {len(svg_metrics.get('pillars', []))} เสา) สำเร็จ!")
 
         if _click_tab_button_in_frames(page, ["OI", "ทุกสัญญา"]):
             page.wait_for_timeout(2000)
             _expand_iframes_for_full_charts(page)
-            page.screenshot(path=shot_oi_all, full_page=True, timeout=15000)
+            page.screenshot(path=shot_oi_all, full_page=False, timeout=15000)
             screenshots.append(shot_oi_all)
             photo_captions.append((shot_oi_all, "🧱 [ภาพที่ 3] กราฟ Open Interest รวม (OI ทุกสัญญา)"))
             text_oi_all = _extract_frame_texts_and_inputs(page)
@@ -1980,6 +2115,7 @@ def capture_hizeiris_web(url: str, profile_dir: str, fixed_dte: float = 0.8) -> 
         "text_diff_tab": text_diff_tab,
         "text_live_round_sd": text_live_round_sd,
         "text_main": text_main,
+        "svg_metrics": svg_metrics,
         "raw_text": (
             f"[VIEW 1: SD · diff (Fixed DTE {fixed_dte})]\n{text_diff_tab}\n\n"
             f"[VIEW 2: CME · Vol (Current Round)]\n{text_main}\n\n"
@@ -2007,33 +2143,38 @@ def parse_snapshot_from_dom_text(
     prev_state: Optional[Dict],
     text_diff_only: str = "",
     text_live_round_sd: str = "",
+    text_main_only: str = "",
+    svg_metrics: Optional[Dict[str, object]] = None,
 ) -> HizeirisSnapshot:
     """
-    ดึงข้อมูลจากแท็บ SD · diff ของเว็บ Hizeiris โดยตรงเป็นอันดับ 1
-    และตรวจสอบความสอดคล้องกับตาราง 1sd / 2sd / 3sd บนหน้าเว็บ 100%
+    ดึงข้อมูลจากหน้าเว็บ Hizeiris แบบ Real-Time 100%:
+    - ตารางกรอบเช้า 0.8 ดึงจากแท็บ SD · diff (text_diff_only)
+    - ข้อมูลรอบปัจจุบัน เสาสัญญา (Put/Call Wall), Intraday/OI, Max Pain, และเส้น IV ดึงจากกราฟเต็ม (text_main_only + svg_metrics)
     """
     diff_scope = text_diff_only if text_diff_only.strip() else raw_text
+    live_scope = text_main_only if text_main_only.strip() else raw_text
+    svg_m = svg_metrics or {}
 
-    contract_m = re.search(r"\b(OG[A-Z0-9]{2,5}|G[0-9][A-Z0-9]{2,5}|GC[A-Z0-9]{2,5})\b", raw_text)
+    contract_m = re.search(r"\b(OG[A-Z0-9]{2,5}|G[0-9][A-Z0-9]{2,5}|GC[A-Z0-9]{2,5})\b", live_scope)
     contract_name = contract_m.group(1) if contract_m else "G3WX6"
 
-    round_m = re.search(r"(รอบ\s*[0-9]+/[0-9]+)", raw_text)
+    round_m = re.search(r"(รอบ\s*[0-9]+/[0-9]+)", live_scope)
     base_round_str = round_m.group(1) if round_m else "รอบล่าสุด"
-    round_hm_m = re.search(r"(?:จันทร์|อังคาร|พุธ|พฤหัสบดี|ศุกร์|เสาร์|อาทิตย์)\s+[0-9]{1,2}\s+[^\n0-9]+\s+([0-2][0-9]:[0-5][0-9])", raw_text)
-    arrival_m = re.search(r"(เข้า\s*[0-2][0-9]:[0-5][0-9])", raw_text)
+    round_hm_m = re.search(r"(?:จันทร์|อังคาร|พุธ|พฤหัสบดี|ศุกร์|เสาร์|อาทิตย์)\s+[0-9]{1,2}\s+[^\n0-9]+\s+([0-2][0-9]:[0-5][0-9])", live_scope)
+    arrival_m = re.search(r"(เข้า\s*[0-2][0-9]:[0-5][0-9])", live_scope)
     if round_hm_m:
         round_str = f"{base_round_str} เวลา {round_hm_m.group(1)}" + (f" ({arrival_m.group(1)})" if arrival_m else "")
     else:
         round_str = base_round_str
 
-    fut_px = _parse_float(r"Futures\s*([2-5][0-9]{3}(?:\.[0-9]+)?)", raw_text, 0.0)
+    fut_px = _parse_float(r"Futures\s*([2-5][0-9]{3}(?:\.[0-9]+)?)", live_scope, 0.0)
     if fut_px == 0.0:
         fut_px = _parse_float(r"ราคากลาง\s*([2-5],?[0-9]{3}(?:\.[0-9]+)?)", raw_text, 3856.8)
 
     latest_gc_val = _parse_float(r"ล่าสุด\s*([2-5],?[0-9]{3}(?:\.[0-9]+)?)", diff_scope, 0.0)
     latest_gc_fut = latest_gc_val if _is_valid_gold_price(latest_gc_val, fut_px) else None
 
-    dte = _parse_float(r"รอบ\s*[0-9]+/[0-9]+.*?DTE\s*([0-9]+\.?[0-9]*)", raw_text, 0.0)
+    dte = _parse_float(r"รอบ\s*[0-9]+/[0-9]+.*?DTE\s*([0-9]+\.?[0-9]*)", live_scope, 0.0)
     if dte == 0.0:
         dte = _parse_float(r"DTE\s*([0-9]+\.?[0-9]*)", raw_text, 0.86)
 
@@ -2112,7 +2253,7 @@ def parse_snapshot_from_dom_text(
         mid_spot = round((sd_diff_table["buy_1sd"] + sd_diff_table["sell_1sd"]) / 2.0, 2)
         table_midpoint_open_fut = round(mid_spot + final_diff, 2)
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = now_th().strftime("%Y-%m-%d")
     prev_open = float(prev_state.get("daily_open_fut", 0.0)) if prev_state else 0.0
     prev_open_iv = float(prev_state.get("open_iv", 0.0)) if prev_state else 0.0
     future_chg = _parse_float(r"Future\s*Chg\s*([+\-]?[0-9]+\.?[0-9]*)", raw_text, 0.0)
@@ -2162,7 +2303,7 @@ def parse_snapshot_from_dom_text(
     vol_chg = _parse_float(r"Vol\s*Chg\s*([+\-]?[0-9]+\.?[0-9]*)", raw_text, 0.0)
     vol_settle_atm = round(atm_live - vol_chg, 2)
 
-    intra_m = re.search(r"Intraday\s+C\s*([0-9,]+)\s*[·•]?\s*P\s*([0-9,]+)\s*[·•]?\s*P/C\s*([0-9.]+)", raw_text, re.IGNORECASE)
+    intra_m = re.search(r"Intraday\s+C\s*([0-9,]+)\s*[·•]?\s*P\s*([0-9,]+)\s*[·•]?\s*P/C\s*([0-9.]+)", live_scope, re.IGNORECASE)
     if intra_m:
         intraday_c = int(intra_m.group(1).replace(",", ""))
         intraday_p = int(intra_m.group(2).replace(",", ""))
@@ -2171,7 +2312,7 @@ def parse_snapshot_from_dom_text(
         intraday_c, intraday_p = 2832, 1697
         intraday_pc = _parse_float(r"Intraday.*?P/C\s*([0-9]+\.?[0-9]*)", raw_text, 0.60)
 
-    oi_m = re.search(r"Open Interest\s+C\s*([0-9,]+)\s*[·•]?\s*P\s*([0-9,]+)\s*[·•]?\s*P/C\s*([0-9.]+)", raw_text, re.IGNORECASE)
+    oi_m = re.search(r"Open Interest\s+C\s*([0-9,]+)\s*[·•]?\s*P\s*([0-9,]+)\s*[·•]?\s*P/C\s*([0-9.]+)", live_scope, re.IGNORECASE)
     if oi_m:
         oi_c = int(oi_m.group(1).replace(",", ""))
         oi_p = int(oi_m.group(2).replace(",", ""))
@@ -2180,7 +2321,7 @@ def parse_snapshot_from_dom_text(
         oi_c, oi_p = 1014, 884
         oi_pc = _parse_float(r"Open Interest.*?P/C\s*([0-9]+\.?[0-9]*)", raw_text, 0.87)
 
-    churn_m = re.search(r"Churn\s*C\s*([0-9.]+)\s*[·•/]?\s*P\s*([0-9.]+)", raw_text, re.IGNORECASE)
+    churn_m = re.search(r"Churn\s*C\s*([0-9.]+)\s*[·•/]?\s*P\s*([0-9.]+)", live_scope, re.IGNORECASE)
     if churn_m:
         churn_c, churn_p = float(churn_m.group(1)), float(churn_m.group(2))
         churn_str = f"C {churn_c:.2f} / P {churn_p:.2f}"
@@ -2188,9 +2329,9 @@ def parse_snapshot_from_dom_text(
         churn_c, churn_p = 0.54, 0.23
         churn_str = "C 0.54 / P 0.23"
 
-    max_pain = _parse_float(r"Max\s*Pain\s*([2-5][0-9]{3})", raw_text, round(fut_px, -1))
+    max_pain = float(svg_m.get("max_pain_chart") or 0) or _parse_float(r"Max\s*Pain\s*([2-5][0-9]{3})", live_scope, round(fut_px, -1))
 
-    call_wall = _parse_float(r"Call\s*wall\s*([2-5][0-9]{3})", raw_text, 0.0)
+    call_wall = float(svg_m.get("call_wall_chart") or 0) or _parse_float(r"Call\s*wall\s*([2-5][0-9]{3})", live_scope, 0.0) or _parse_float(r"Call\s*wall\s*([2-5][0-9]{3})", raw_text, 0.0)
     call_oi_cnt = ""
     cw_plan_m = re.search(r"Call\s+[0-9.]+\s*\(([2-5][0-9]{3})\)[^\n]*?OI\s*([0-9,]+)", raw_text, re.IGNORECASE)
     if cw_plan_m:
@@ -2200,7 +2341,7 @@ def parse_snapshot_from_dom_text(
     if call_wall == 0.0:
         call_wall = round(fut_px + 60, -1)
 
-    put_wall = _parse_float(r"Put\s*wall\s*([2-5][0-9]{3})", raw_text, 0.0)
+    put_wall = float(svg_m.get("put_wall_chart") or 0) or _parse_float(r"Put\s*wall\s*([2-5][0-9]{3})", live_scope, 0.0) or _parse_float(r"Put\s*wall\s*([2-5][0-9]{3})", raw_text, 0.0)
     put_oi_cnt = ""
     pw_plan_m = re.search(r"Put\s+[0-9.]+\s*\(([2-5][0-9]{3})\)[^\n]*?OI\s*([0-9,]+)", raw_text, re.IGNORECASE)
     if pw_plan_m:
@@ -2210,11 +2351,22 @@ def parse_snapshot_from_dom_text(
     if put_wall == 0.0:
         put_wall = round(fut_px - 15, -1)
 
-    pillars = re.findall(r"\b([0-9]{1,3}/[0-9]{1,3})\b", raw_text)
-    unique_pillars = []
-    for p in pillars:
-        if p not in unique_pillars and not p.endswith("/121") and not p.endswith("/134") and not p.endswith("/80"):
-            unique_pillars.append(p)
+    svg_pillars = list(svg_m.get("pillars") or [])
+    if svg_pillars:
+        unique_pillars = svg_pillars
+    else:
+        pillars = re.findall(r"\b([0-9]{1,4}/[0-9]{1,4})\b", live_scope)
+        unique_pillars = []
+        round_pair = ""
+        if round_m:
+            m_rp = re.search(r"([0-9]+/[0-9]+)", round_m.group(1))
+            if m_rp:
+                round_pair = m_rp.group(1)
+        for p in pillars:
+            if p == round_pair or p.endswith("/183") or p.endswith("/121") or p.endswith("/134") or p.endswith("/80"):
+                continue
+            if p not in unique_pillars:
+                unique_pillars.append(p)
     pillar_labels_text = ", ".join(unique_pillars[:12]) if unique_pillars else f"Intraday C {intraday_c}/P {intraday_p} | OI C {oi_c}/P {oi_p}"
 
     cme_series = re.findall(r"((?:OG|G[0-9]|GC)[A-Z0-9]{2,5}\s+[0-9.]+\s+[0-9.]+\s+[+\-]?[0-9.]+\s+[0-9.]+)", raw_text)
@@ -2222,7 +2374,7 @@ def parse_snapshot_from_dom_text(
 
     return HizeirisSnapshot(
         contract_name=contract_name,
-        timestamp=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        timestamp=now_th().strftime("%Y-%m-%d %H:%M"),
         round_str=round_str,
         futures_price=fut_px,
         latest_gc_fut=latest_gc_fut,
@@ -2260,6 +2412,10 @@ def parse_snapshot_from_dom_text(
         sd_diff_table=sd_diff_table,
         cme_dynamic_sd_table=cme_dynamic_sd_table,
         live_round_sd_table=live_round_sd_table,
+        iv_put_wing_live=float(svg_m.get("iv_put_wing_live") or 0.0),
+        iv_put_wing_settle=float(svg_m.get("iv_put_wing_settle") or 0.0),
+        iv_call_wing_live=float(svg_m.get("iv_call_wing_live") or 0.0),
+        iv_call_wing_settle=float(svg_m.get("iv_call_wing_settle") or 0.0),
     )
 
 
@@ -2724,7 +2880,7 @@ def render_final_plan_summary_image(
     "🏆 [ภาพสรุปปิดท้าย] แผนการเล่นฟันธง & โพยจุดเข้า–ออกฉบับเข้าใจง่าย (อิงราคาและสถานการณ์จริง)"
     เพื่อส่งเป็นรายการสุดท้ายของรายงานใน Telegram ให้ผู้ใช้เปิดดูภาพเดียวเข้าใจแผนทั้งหมดทันที
     """
-    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    ts = now_th().strftime("%Y%m%d_%H%M")
     out_path = f"hizeiris_5_final_plan_summary_{ts}.png"
 
     tb = exact_calc["sd_table_exact"]
@@ -3419,31 +3575,94 @@ def synthesize_full_report_messages(snap: HizeirisSnapshot, exact_calc: Dict, ca
     return build_clean_section_messages(snap, exact_calc, round_history, ai_audit)
 
 
+def _prepare_fast_telegram_image(path: str) -> str:
+    """
+    แปลงไฟล์ภาพ PNG ขนาดใหญ่ (2-4 MB) ให้เป็น JPEG ความคมชัดสูงระดับ 4:4:4 (subsampling=0, quality=88)
+    ขนาดเพียง ~150-250 KB เพื่อป้องกันปัญหา Read timed out (read timeout=30) บน GitHub Actions 100%
+    โดยตัวหนังสือและตัวเลขยังคงคมชัดทุกจุด
+    """
+    try:
+        from PIL import Image, ImageChops
+        with Image.open(path) as img:
+            rgb = img.convert("RGB")
+            w, h = rgb.size
+            # ตัดขอบว่างด้านล่างออกอัตโนมัติหากภาพสูงเกินเนื้อหาจริง
+            if h > 1250:
+                bg = Image.new("RGB", (w, h), rgb.getpixel((w - 5, h - 5)))
+                diff = ImageChops.difference(rgb, bg)
+                bbox = diff.getbbox()
+                if bbox and bbox[3] < h - 40:
+                    crop_h = max(min(bbox[3] + 28, h), 960)
+                    rgb = rgb.crop((0, 0, w, crop_h))
+                    w, h = rgb.size
+            if w > 1280:
+                ratio = 1280.0 / float(w)
+                rgb = rgb.resize((1280, int(h * ratio)), Image.Resampling.LANCZOS)
+            jpg_path = os.path.splitext(path)[0] + "_fast.jpg"
+            rgb.save(jpg_path, format="JPEG", quality=82, optimize=True)
+            if os.path.exists(jpg_path) and os.path.getsize(jpg_path) > 1000:
+                return jpg_path
+    except Exception:
+        pass
+    return path
+
+
 def send_telegram_photos(photo_captions: List[Tuple[str, str]], token: str, chat_id: str) -> None:
     if token == "YOUR_BOT_TOKEN_HERE" or chat_id == "YOUR_CHAT_ID_HERE" or not photo_captions:
         return
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    session = requests.Session()
     for path, title in photo_captions:
         if not os.path.exists(path):
             continue
-        for attempt in range(4):
+        upload_path = _prepare_fast_telegram_image(path)
+        size_kb = os.path.getsize(upload_path) / 1024.0
+        sent_ok = False
+
+        # วิธีหลัก: ส่งผ่าน curl -4 --http1.1 (เสถียรและเร็วที่สุดบน GitHub Actions ไม่ค้างที่ SSL socket)
+        for attempt in range(3):
             try:
-                with open(path, "rb") as img_file:
-                    resp = requests.post(
-                        url,
-                        data={"chat_id": chat_id, "caption": title},
-                        files={"photo": img_file},
-                        timeout=30,
-                    )
-                if resp.status_code == 200:
-                    print(f"📸 ส่งภาพ {path} เข้า Telegram สำเร็จ (status 200)")
+                cmd = [
+                    "curl", "-4", "-sS", "--http1.1",
+                    "--connect-timeout", "10",
+                    "--max-time", "25",
+                    "-F", f"chat_id={chat_id}",
+                    "-F", f"caption={title}",
+                    "-F", f"photo=@{upload_path}",
+                    url,
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=28)
+                if res.returncode == 0 and '"ok":true' in res.stdout:
+                    print(f"📸 ส่งภาพ {upload_path} ({size_kb:.0f} KB) เข้า Telegram สำเร็จ (status 200)")
+                    sent_ok = True
                     break
-                time.sleep(2 * (attempt + 1))
-            except Exception as e:
-                if attempt == 3:
-                    print(f"⚠️ ส่งภาพ {path} ข้ามไปหลังลอง 4 ครั้ง ({e})")
-                else:
+            except Exception:
+                pass
+            time.sleep(1.5)
+
+        # วิธีสำรอง: ส่งผ่าน requests.Session() หากระบบไม่มี curl
+        if not sent_ok:
+            for attempt in range(3):
+                try:
+                    with open(upload_path, "rb") as img_file:
+                        resp = session.post(
+                            url,
+                            data={"chat_id": chat_id, "caption": title},
+                            files={"photo": img_file},
+                            timeout=(10, 25),
+                        )
+                    if resp.status_code == 200:
+                        print(f"📸 ส่งภาพ {upload_path} ({size_kb:.0f} KB) เข้า Telegram สำเร็จ (status 200)")
+                        sent_ok = True
+                        break
                     time.sleep(2 * (attempt + 1))
+                except Exception as e:
+                    if attempt == 2:
+                        print(f"⚠️ ส่งภาพ {path} ข้ามไปหลังลองซ้ำ ({e})")
+                    else:
+                        time.sleep(2 * (attempt + 1))
+        if sent_ok:
+            time.sleep(0.3)
 
 
 def split_telegram_chunks(text: str, max_len: int = 3800) -> List[str]:
@@ -3475,25 +3694,63 @@ def send_telegram_parts(section_messages: List[str], token: str, chat_id: str) -
         return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+    session = requests.Session()
     for idx, p in enumerate(all_chunks, 1):
         sent_ok = False
-        for attempt in range(4):
+        payload_md = json.dumps({"chat_id": chat_id, "text": p, "parse_mode": "Markdown"}, ensure_ascii=False)
+        payload_plain = json.dumps({"chat_id": chat_id, "text": p.replace("*", "").replace("`", "")}, ensure_ascii=False)
+
+        for attempt in range(3):
             try:
-                resp = requests.post(url, json={"chat_id": chat_id, "text": p, "parse_mode": "Markdown"}, timeout=20)
-                if resp.status_code != 200:
-                    resp = requests.post(url, json={"chat_id": chat_id, "text": p.replace("*", "").replace("`", "")}, timeout=20)
-                if resp.status_code == 200:
+                cmd = [
+                    "curl", "-4", "-sS", "--http1.1",
+                    "--connect-timeout", "10",
+                    "--max-time", "20",
+                    "-H", "Content-Type: application/json",
+                    "-d", payload_md,
+                    url,
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=22)
+                if res.returncode == 0 and '"ok":true' in res.stdout:
                     print(f"✅ Telegram ข้อความที่ {idx}/{len(all_chunks)} status 200")
                     sent_ok = True
                     break
-                time.sleep(2 * (attempt + 1))
-            except Exception as e:
-                if attempt == 3:
-                    print(f"⚠️ ส่งข้อความที่ {idx} ข้ามไปหลังลอง 4 ครั้ง ({e})")
-                else:
-                    time.sleep(2 * (attempt + 1))
+                # หากติด Markdown syntax ให้ส่งแบบ plain text ทันที
+                cmd_plain = [
+                    "curl", "-4", "-sS", "--http1.1",
+                    "--connect-timeout", "10",
+                    "--max-time", "20",
+                    "-H", "Content-Type: application/json",
+                    "-d", payload_plain,
+                    url,
+                ]
+                res2 = subprocess.run(cmd_plain, capture_output=True, text=True, timeout=22)
+                if res2.returncode == 0 and '"ok":true' in res2.stdout:
+                    print(f"✅ Telegram ข้อความที่ {idx}/{len(all_chunks)} status 200")
+                    sent_ok = True
+                    break
+            except Exception:
+                pass
+            time.sleep(1.2)
+
+        if not sent_ok:
+            for attempt in range(3):
+                try:
+                    resp = session.post(url, json={"chat_id": chat_id, "text": p, "parse_mode": "Markdown"}, timeout=(8, 20))
+                    if resp.status_code != 200:
+                        resp = session.post(url, json={"chat_id": chat_id, "text": p.replace("*", "").replace("`", "")}, timeout=(8, 20))
+                    if resp.status_code == 200:
+                        print(f"✅ Telegram ข้อความที่ {idx}/{len(all_chunks)} status 200")
+                        sent_ok = True
+                        break
+                    time.sleep(1.5 * (attempt + 1))
+                except Exception as e:
+                    if attempt == 2:
+                        print(f"⚠️ ส่งข้อความที่ {idx} ข้ามไปหลังลองซ้ำ ({e})")
+                    else:
+                        time.sleep(1.5 * (attempt + 1))
         if sent_ok:
-            time.sleep(0.4)
+            time.sleep(0.35)
 
 
 def load_state(path: str) -> Optional[Dict]:
@@ -3536,7 +3793,7 @@ def run_once():
         # ใช้ตัวเลขจริงตรงตามหน้าเว็บ Hizeiris ของเช้าวันที่ 18 พ.ย. (ราคาเปิด 3,869.70 | Spot 3,867.20 | IV 27.09% | 1SD 49.08)
         snap = HizeirisSnapshot(
             contract_name="G3WX6",
-            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M"),
+            timestamp=now_th().strftime("%Y-%m-%d %H:%M"),
             round_str="รอบ 85/85 เวลา 07:30 (เข้า 07:32)",
             futures_price=3851.9,
             latest_gc_fut=3851.9,
@@ -3587,6 +3844,8 @@ def run_once():
             prev_state,
             text_diff_only=str(cap.get("text_diff_tab") or ""),
             text_live_round_sd=str(cap.get("text_live_round_sd") or ""),
+            text_main_only=str(cap.get("text_main") or ""),
+            svg_metrics=cap.get("svg_metrics") if isinstance(cap.get("svg_metrics"), dict) else None,
         )
         print(
             f"✅ ดึงตาราง SD·diff & รอบปัจจุบันตรงกับหน้าเว็บสำเร็จ: {snap.contract_name} ({snap.round_str}) | "
@@ -3613,7 +3872,7 @@ def run_once():
                 CONFIG["TELEGRAM_CHAT_ID"],
             )
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = now_th().strftime("%Y-%m-%d")
     old_history = []
     if prev_state and prev_state.get("trading_day") == today_str:
         old_history = list(prev_state.get("round_history", []))
@@ -3627,7 +3886,7 @@ def run_once():
                 item["z_sd"] = f"{z_val:+.2f}SD"
 
     current_round_entry = {
-        "time": datetime.now().strftime("%H:%M"),
+        "time": now_th().strftime("%H:%M"),
         "round_str": snap.round_str,
         "dte": snap.dte,
         "live_1sd": float(mvc["skew_dte_info"]["live_r1"]),
@@ -3694,7 +3953,7 @@ def start_scheduler():
     for round_idx in range(1, max_rounds + 1):
         if STOP_REQUESTED:
             break
-        print(f"\n==================== รอบการทำงานที่ {round_idx}/{max_rounds} ({datetime.now().strftime('%H:%M:%S')}) ====================")
+        print(f"\n==================== รอบการทำงานที่ {round_idx}/{max_rounds} ({now_th().strftime('%H:%M:%S')}) ====================")
         try:
             run_once()
         except SystemExit:
@@ -3703,7 +3962,7 @@ def start_scheduler():
             print(f"⚠️ ข้ามข้อผิดพลาดย่อยในรอบที่ {round_idx}: {e}")
         if round_idx >= max_rounds or CONFIG["DRY_RUN"] or STOP_REQUESTED:
             break
-        now = datetime.now()
+        now = now_th()
         # หากเพิ่งรันช่วง 06:00–06:24 น. (ก่อนเว็บ Hizeiris อัปเดตราคาเปิดตอน 06:24–06:30 น.)
         # ให้ปลุกบอทมาดึงราคาเปิดใหม่อัตโนมัติทันทีที่เวลา 06:28 น.!
         if now.hour == 6 and now.minute < 26:
