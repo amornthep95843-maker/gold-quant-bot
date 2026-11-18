@@ -1683,6 +1683,120 @@ def _click_tab_button_in_frames(page, tab_keywords: List[str]) -> bool:
     return clicked
 
 
+
+def _get_page_round_info(page) -> Tuple[str, str]:
+    """อ่านเวลารอบปัจจุบันบนหน้าเว็บ เช่น ('07:30', 'รอบ 85/85')"""
+    for frame in page.frames:
+        try:
+            txt = frame.inner_text("body", timeout=2000)
+            if not txt:
+                continue
+            m_time = re.search(r"(?:จันทร์|อังคาร|พุธ|พฤหัสบดี|ศุกร์|เสาร์|อาทิตย์)\s+[0-9]{1,2}\s+[^\n0-9]+\s+([0-2][0-9]:[0-5][0-9])", txt)
+            m_rnd = re.search(r"(รอบ\s*[0-9]+/[0-9]+)", txt)
+            if m_time or m_rnd:
+                return (m_time.group(1) if m_time else "", m_rnd.group(1) if m_rnd else "")
+        except Exception:
+            pass
+    return ("", "")
+
+
+def _force_jump_to_latest_round(page) -> None:
+    """บังคับกดปุ่มไปรอบสุดท้าย (⏭) และเลื่อนแถบเวลา/ดรอปดาวน์เวลาไปที่รอบล่าสุดเสมอ"""
+    for frame in page.frames:
+        try:
+            frame.locator("body").evaluate(
+                """body => {
+                    // 1. เลื่อน range slider ทุกตัวไปขวาสุด (max)
+                    Array.from(document.querySelectorAll('input[type="range"]')).forEach(rng => {
+                        if (rng.max && rng.value !== rng.max) {
+                            rng.value = rng.max;
+                            rng.dispatchEvent(new Event('input', { bubbles: true }));
+                            rng.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                    });
+                    // 2. กดปุ่ม ⏭ หรือปุ่มไปรอบสุดท้ายหากมี
+                    Array.from(document.querySelectorAll('button, span, div')).forEach(el => {
+                        if (el.children.length > 1) return;
+                        const t = (el.innerText || '').trim();
+                        const title = (el.getAttribute('title') || '').trim();
+                        if (t === '⏭' || t === '>>|' || t === '>|' || title.includes('ล่าสุด') || title.includes('สุดท้าย')) {
+                            el.click();
+                        }
+                    });
+                }""",
+                timeout=2500,
+            )
+        except Exception:
+            pass
+
+
+def _wait_for_latest_15min_round(page, url: str) -> None:
+    """
+    แก้ปัญหาเวลาส่งรายงานกับเวลารอบบนหน้าเว็บไม่ตรงกัน (เช่น ส่งตอน 07:30 แต่ได้รอบ 07:15):
+    - เว็บ Hizeiris ตัดรอบทุก 15 นาที (:00, :15, :30, :45) แต่ข้อมูลจะส่งเข้าเว็บเสร็จที่นาที +2.0 ถึง +2.5
+      (เช่น รอบ 07:30 จะเข้าเว็บตอน 07:32 น.)
+    - หากบอทเปิดเว็บในช่วงนาทีที่ 0..4, 15..19, 30..34, 45..49 แล้วบนหน้าเว็บยังแสดงรอบเก่าอยู่
+      บอทจะรอและกดปุ่มรีเฟรช ⟳ ทุก 15 วินาที จนกว่ารอบเวลาปัจจุบันจะเข้าเว็บครบเรียบร้อยก่อนแคปภาพ!
+    """
+    _force_jump_to_latest_round(page)
+    now = datetime.now()
+    # ตลาดพักช่วง 05:00 - 06:00 น. (รอบสุดท้ายของวันเก่าคือ 04:45 น.)
+    if now.hour == 5 or (now.hour == 6 and now.minute < 15):
+        return
+
+    q_min = (now.minute // 15) * 15
+    expected_hm = f"{now.hour:02d}:{q_min:02d}"
+    cur_hm, cur_rnd = _get_page_round_info(page)
+    print(f"🕒 ตรวจสอบเวลารอบบนเว็บ: เวลาปัจจุบัน {now.strftime('%H:%M:%S')} | รอบที่ควรเป็น: {expected_hm} | รอบบนเว็บตอนนี้: {cur_hm or 'N/A'} ({cur_rnd or 'N/A'})")
+
+    if cur_hm == expected_hm:
+        return
+
+    # หากอยู่ในช่วง 0-5 นาทีหลังตัดรอบ 15 นาที (เช่น 07:30 - 07:34) และรอบใหม่ยังไม่เข้า ให้รอจนกว่าจะเข้า (สูงสุด 10 รอบ = 150 วินาที)
+    if (now.minute % 15) <= 5:
+        for wait_idx in range(1, 11):
+            print(f"⏳ รอข้อมูลรอบ {expected_hm} เข้าเว็บ Hizeiris (ปกติเข้าที่นาที +2.1, ครั้งที่ {wait_idx}/10)...")
+            page.wait_for_timeout(15000)
+            # กดปุ่มรีเฟรช ⟳ บนหน้าเว็บ หรือ reload
+            refreshed = False
+            for frame in page.frames:
+                try:
+                    did_click = frame.locator("body").evaluate(
+                        """body => {
+                            const els = Array.from(document.querySelectorAll('button, span, a, div'));
+                            for (const el of els) {
+                                if (el.children.length > 1) continue;
+                                const t = (el.innerText || '').trim();
+                                if (t === '⟳' || t === '↻' || t === '🔄' || t.includes('รีเฟรชเองทุก')) {
+                                    el.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }""",
+                        timeout=2000,
+                    )
+                    if did_click:
+                        refreshed = True
+                except Exception:
+                    pass
+            if not refreshed and wait_idx % 2 == 0:
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                    page.wait_for_timeout(5000)
+                except Exception:
+                    pass
+            else:
+                page.wait_for_timeout(2500)
+
+            _force_jump_to_latest_round(page)
+            cur_hm, cur_rnd = _get_page_round_info(page)
+            if cur_hm == expected_hm:
+                print(f"✅ ข้อมูลรอบใหม่ {cur_hm} ({cur_rnd}) เข้าเว็บเรียบร้อยแล้ว! เริ่มดึงข้อมูลและแคปภาพทันที")
+                return
+        print(f"ℹ️ สิ้นสุดเวลารอ ใช้ข้อมูลรอบล่าสุดที่มีบนเว็บ ({cur_hm} {cur_rnd})")
+
+
 def _configure_sd_diff_and_ensure_latest_round(page, fixed_dte: float) -> None:
     """
     บังคับตั้งค่าแท็บ SD · diff ให้ตรงกับหน้าเว็บมาตรฐาน 100%:
@@ -1780,6 +1894,7 @@ def capture_hizeiris_web(url: str, profile_dir: str, fixed_dte: float = 0.8) -> 
         page.set_default_timeout(15000)
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(7500)
+        _wait_for_latest_15min_round(page, url)
         _expand_iframes_for_full_charts(page)
         page.wait_for_timeout(800)
 
@@ -1903,7 +2018,13 @@ def parse_snapshot_from_dom_text(
     contract_name = contract_m.group(1) if contract_m else "G3WX6"
 
     round_m = re.search(r"(รอบ\s*[0-9]+/[0-9]+)", raw_text)
-    round_str = round_m.group(1) if round_m else "รอบล่าสุด"
+    base_round_str = round_m.group(1) if round_m else "รอบล่าสุด"
+    round_hm_m = re.search(r"(?:จันทร์|อังคาร|พุธ|พฤหัสบดี|ศุกร์|เสาร์|อาทิตย์)\s+[0-9]{1,2}\s+[^\n0-9]+\s+([0-2][0-9]:[0-5][0-9])", raw_text)
+    arrival_m = re.search(r"(เข้า\s*[0-2][0-9]:[0-5][0-9])", raw_text)
+    if round_hm_m:
+        round_str = f"{base_round_str} เวลา {round_hm_m.group(1)}" + (f" ({arrival_m.group(1)})" if arrival_m else "")
+    else:
+        round_str = base_round_str
 
     fut_px = _parse_float(r"Futures\s*([2-5][0-9]{3}(?:\.[0-9]+)?)", raw_text, 0.0)
     if fut_px == 0.0:
@@ -2294,10 +2415,14 @@ def _compute_setup_win_rate_and_reasons(
 
 
 def build_final_master_conclusion(snap: HizeirisSnapshot, exact_calc: Dict) -> str:
+    """
+    สร้างข้อความสุดท้าย: "🏆 บทสรุปสุดท้าย: แผนการเล่นฟันธง (ฉบับเข้าใจง่าย — อิงราคาและสถานการณ์จริงหน้างาน)"
+    เขียนด้วยภาษาที่เข้าใจง่าย อ่านจบใน 10 วินาทีรู้ทันทีว่าตอนนี้เกิดอะไรขึ้น ควรเข้าตรงไหน โอกาสชนะเท่าไหร่ และเพราะอะไร
+    """
     tb = exact_calc["sd_table_exact"]
     ws = exact_calc["walls_spot"]
     mvc = exact_calc["morning_vs_current"]
-    m4 = exact_calc["m4_micro"]
+    skew_info = mvc["skew_dte_info"]
     tactical = exact_calc["tactical_tickets"]
     zones = exact_calc["six_zone_plans"]
     spot = exact_calc["spot"]
@@ -2308,91 +2433,151 @@ def build_final_master_conclusion(snap: HizeirisSnapshot, exact_calc: Dict) -> s
     buy_2sd_ticket = zones[4]
     sell_2sd_ticket = zones[1]
 
-    b1_win, b1_reasons = _compute_setup_win_rate_and_reasons(buy_first, snap, exact_calc, "first")
-    b2_win, b2_reasons = _compute_setup_win_rate_and_reasons(buy_2sd_ticket, snap, exact_calc, "killzone")
-    s1_win, s1_reasons = _compute_setup_win_rate_and_reasons(sell_first, snap, exact_calc, "first")
-    s2_win, s2_reasons = _compute_setup_win_rate_and_reasons(sell_2sd_ticket, snap, exact_calc, "killzone")
+    b1_win, _ = _compute_setup_win_rate_and_reasons(buy_first, snap, exact_calc, "first")
+    b2_win, _ = _compute_setup_win_rate_and_reasons(buy_2sd_ticket, snap, exact_calc, "killzone")
+    s1_win, _ = _compute_setup_win_rate_and_reasons(sell_first, snap, exact_calc, "first")
+    s2_win, _ = _compute_setup_win_rate_and_reasons(sell_2sd_ticket, snap, exact_calc, "killzone")
 
-    def _render_focus_card(header: str, t: Dict[str, object], win_str: str, reasons: List[str]) -> str:
-        dist_now = round(abs(spot - float(t["entry_spot_num"])), 2)
-        dir_txt = "สูงกว่าจุดเข้า" if t["side"] == "BUY" else "ต่ำกว่าจุดเข้า"
-        return (
-            f"*{header}*\n"
-            f"   • 📍 *ควรเข้าตรงไหน*: ดัก *{t['side']}* ที่พิกัด *`{t['entry_spot']}`* (Futures `{t['entry_fut']}` | ห่างราคาปัจจุบัน `{dist_now:.2f}` จุด)\n"
-            f"   • 🎯 *เป้าทำกำไร ({dir_txt})*: {t['tp_line']}\n"
-            f"   • 🛑 *จุดตัดขาดทุนปกติ (SL)*: {t['sl_norm_line']}\n"
-            f"   • 🔄 *แผนแก้พอร์ต Supa888*: {t['rec1_line']}\n"
-            f"   • 🏆 *โอกาสชนะ (Win Rate)*: {win_str}\n"
-            f"   • 💡 *เหตุผลทำไมต้องเข้าจุดนี้ (จากการวิเคราะห์รวมรอบนี้)*:\n"
-            f"      1) {reasons[0]}\n"
-            f"      2) {reasons[1]}\n"
-            f"      3) {reasons[2]}\n"
-            f"      4) {reasons[3]}"
+    delta_open_num = round(spot - open_spot, 2)
+    pos_vs_open_txt = (
+        f"อยู่ต่ำกว่าราคาเปิดเช้า `{abs(delta_open_num):.2f}` จุด (`{mvc['z_from_open']}`)"
+        if delta_open_num < 0
+        else f"อยู่สูงกว่าราคาเปิดเช้า `+{delta_open_num:.2f}` จุด (`{mvc['z_from_open']}`)"
+    )
+
+    if snap.intraday_c > snap.intraday_p:
+        flow_plain_txt = (
+            f"วันนี้คนในตลาดเข้าซื้อฝั่งขาขึ้น (`Call {snap.intraday_c:,}` สัญญา) มากกว่าฝั่งขาลง (`Put {snap.intraday_p:,}` สัญญา, `P/C = {snap.intraday_pc:.2f}`) "
+            f"แปลว่าแรงเก็งกำไรระหว่างวันยังพยายามประคองราคาและเล็งเป้าแม่เหล็กด้านบนที่ `Max Pain {ws['max_pain_spot']:,.2f}` (Fut `{ws['max_pain_fut']:.0f}`)"
+        )
+    else:
+        flow_plain_txt = (
+            f"วันนี้คนในตลาดเข้าซื้อฝั่งขาลง (`Put {snap.intraday_p:,}` สัญญา) มากกว่าฝั่งขาขึ้น (`Call {snap.intraday_c:,}` สัญญา, `P/C = {snap.intraday_pc:.2f}`) "
+            f"แปลว่ามีแรงกดดันฝั่งขายระหว่างวันลงมาทดสอบแนวรับด้านล่าง"
         )
 
-    card_buy_1 = _render_focus_card(
-        f"🟢 จุดสนใจ BUY อันดับ 1 (ด่านรับใกล้ราคาปัจจุบันที่สุด): {buy_first['short_title']}",
-        buy_first, b1_win, b1_reasons,
-    )
-    card_buy_2 = _render_focus_card(
-        f"🔥 จุดสนใจ BUY ไม้เอกประจำวัน (ดักช้อนคำใหญ่ Kill Zone): {buy_2sd_ticket['short_title']}",
-        buy_2sd_ticket, b2_win, b2_reasons,
-    )
-    card_sell_1 = _render_focus_card(
-        f"🔴 จุดสนใจ SELL อันดับ 1 (ด่านต้านใกล้ราคาปัจจุบันที่สุด): {sell_first['short_title']}",
-        sell_first, s1_win, s1_reasons,
-    )
-    card_sell_2 = _render_focus_card(
-        f"🔥 จุดสนใจ SELL ไม้เอกประจำวัน (ดักทุบคำใหญ่ Kill Zone): {sell_2sd_ticket['short_title']}",
-        sell_2sd_ticket, s2_win, s2_reasons,
-    )
+    if skew_info["skew_bias"] == "CALL_SKEW":
+        iv_plain_txt = (
+            f"เส้นความผันผวนสีเขียว (`Vol สด`) *เอียงเชิดขึ้นฝั่งขวา (ฝั่ง Call แพงกว่าฝั่ง Put)* "
+            f"แสดงว่าตลาดยังให้ค่าพรีเมียมขาขึ้นสูง เวลาราคาย่อลงมาใกล้แนวรับจะมีแรงซื้อดีดกลับไว แต่เวลาขึ้นไปชนแนวต้านแรกให้เน้นเก็บกำไรสั้นก่อน"
+        )
+    elif skew_info["skew_bias"] == "PUT_SKEW":
+        iv_plain_txt = (
+            f"เส้นความผันผวนสีเขียว (`Vol สด`) *เอียงเชิดขึ้นฝั่งซ้าย (ฝั่ง Put แพงกว่าฝั่ง Call)* "
+            f"แสดงว่าตลาดกำลังกลัวขาลง ห้ามรับมีดกลางอากาศ ให้รอรับเฉพาะที่ด่านแนวรับสำคัญเท่านั้น"
+        )
+    else:
+        iv_plain_txt = (
+            f"เส้นความผันผวนสีเขียว (`Vol สด`) *โค้งสมดุลทั้งสองฝั่ง* "
+            f"แสดงว่าตลาดวิ่งเคารพกรอบแนวรับ–แนวต้านของวัน เหมาะกับการดักซื้อที่แนวรับและดักขายที่แนวต้านตามแผน"
+        )
 
     dist_b1 = round(abs(spot - float(buy_first["entry_spot_num"])), 2)
     dist_s1 = round(abs(float(sell_first["entry_spot_num"]) - spot), 2)
-    if dist_b1 <= dist_s1:
-        priority_note = (
-            f"ขณะนี้ราคาปัจจุบัน (`{spot:,.2f}`) อยู่ใกล้ด่านรับฝั่งล่าง (`{buy_first['entry_spot']}`, ห่าง `{dist_b1:.2f}` จุด) "
-            f"มากกว่าด่านต้านฝั่งบน (`{sell_first['entry_spot']}`, ห่าง `{dist_s1:.2f}` จุด) -> *ให้น้ำหนักเฝ้ารอดัก BUY ที่ `{buy_first['entry_spot']}` เป็นลำดับแรก* "
-            f"พร้อมวาง Pending SELL ดักด้านบนที่ `{sell_first['entry_spot']}` คู่กัน"
+
+    if dist_b1 <= 6.0:
+        now_action_txt = (
+            f"🟢 *เตรียมเข้า BUY ได้เลย*: ตอนนี้ราคา (`{spot:,.2f}`) ลงมาจ่อที่ด่านรับแรก *{buy_first['short_title']}* (`{buy_first['entry_spot']}`) แล้ว "
+            f"รอจังหวะแท่งเทียนหยุดไหลแล้วกด BUY ตามแผนด้านล่างทันที!"
+        )
+    elif dist_s1 <= 6.0:
+        now_action_txt = (
+            f"🔴 *เตรียมเข้า SELL ได้เลย*: ตอนนี้ราคา (`{spot:,.2f}`) ขึ้นมาจ่อที่ด่านต้านแรก *{sell_first['short_title']}* (`{sell_first['entry_spot']}`) แล้ว "
+            f"รอจังหวะราคาชะลอตัวแล้วกด SELL ตามแผนด้านล่างทันที!"
+        )
+    elif dist_b1 <= dist_s1:
+        now_action_txt = (
+            f"⏳ *ห้ามกดเข้ากลางอากาศ! ให้ตั้งรอ (Pending Limit) โดยเน้นฝั่ง BUY ก่อน*: "
+            f"เพราะราคาปัจจุบัน (`{spot:,.2f}`) อยู่กลางทาง แต่ค่อนมาทางฝั่งแนวรับด้านล่าง (`{buy_first['entry_spot']}`, ห่าง `{dist_b1:.2f}` จุด) "
+            f"มากกว่าแนวต้านด้านบน (`{sell_first['entry_spot']}`, ห่าง `{dist_s1:.2f}` จุด)"
         )
     else:
-        priority_note = (
-            f"ขณะนี้ราคาปัจจุบัน (`{spot:,.2f}`) อยู่ใกล้ด่านต้านฝั่งบน (`{sell_first['entry_spot']}`, ห่าง `{dist_s1:.2f}` จุด) "
-            f"มากกว่าด่านรับฝั่งล่าง (`{buy_first['entry_spot']}`, ห่าง `{dist_b1:.2f}` จุด) -> *ให้น้ำหนักเฝ้ารอดัก SELL ที่ `{sell_first['entry_spot']}` เป็นลำดับแรก* "
-            f"พร้อมวาง Pending BUY ดักด้านล่างที่ `{buy_first['entry_spot']}` คู่กัน"
+        now_action_txt = (
+            f"⏳ *ห้ามกดเข้ากลางอากาศ! ให้ตั้งรอ (Pending Limit) โดยเน้นฝั่ง SELL ก่อน*: "
+            f"เพราะราคาปัจจุบัน (`{spot:,.2f}`) อยู่กลางทาง แต่ค่อนไปทางแนวต้านด้านบน (`{sell_first['entry_spot']}`, ห่าง `{dist_s1:.2f}` จุด) "
+            f"มากกว่าแนวรับด้านล่าง (`{buy_first['entry_spot']}`, ห่าง `{dist_b1:.2f}` จุด)"
         )
 
-    return (
-        f"🏆 *บทสรุปสุดท้าย: จุดสนใจหลัก & แผนการเล่นฟันธงจากการวิเคราะห์รวมทั้งหมด*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔍 *1. สรุปภาพรวมข้อมูลจริงที่ดึงมาทั้งหมดในรอบนี้ (ทำไมตลาดถึงเป็นแบบนี้)*:\n"
-        f"   • *ราคาเปิดเช้า (ตรงกับหน้าเว็บ 100%)*: Open Spot *`{open_spot:,.2f}`* (Open Futures `{exact_calc['open_fut']:,.2f}`, หัก Diff `{snap.diff:.2f}`, IV เช้า `{exact_calc['open_iv']:.2f}%`, DTE `{snap.fixed_dte}`)\n"
-        f"   • *ราคาปัจจุบัน*: XAU/USD Spot อยู่ที่ *`{spot:,.2f}`* (ตรงกับกราฟ `[ภาพที่ 4]` 100%) เปลี่ยนแปลง `{mvc['delta_px_from_open']}` จุดจากราคาเปิดเช้า (`{mvc['z_from_open']}` ของกรอบ Fix เช้า `1SD = ±{tb['range_1sd']:.2f}`)\n"
-        f"   • *โครงสร้างโฟลว์ & กำแพงสถาบัน*: รายวัน `Intraday C {snap.intraday_c:,} / P {snap.intraday_p:,}` (`P/C {snap.intraday_pc:.2f}`, `Churn {snap.churn_str}`) ส่วนฐานใหญ่ `OI C {snap.oi_c:,} / P {snap.oi_p:,}` (`P/C {snap.oi_pc:.2f}`) โดยมีกำแพงรับ `Put Wall {ws['put_wall_spot']:,.2f}` และกำแพงต้าน `Call Wall {ws['call_wall_spot']:,.2f}` (จุดดูดแม่เหล็ก `Max Pain {ws['max_pain_spot']:,.2f}`)\n"
-        f"   • *เทียบ DTE รอบนี้ vs กรอบเช้า 0.8*: กรอบเช้า `DTE 0.80` (`1SD ±{tb['range_1sd']:.2f}`) -> รอบนี้ `DTE {snap.dte:.2f}` (`1SD รอบนี้ ±{mvc['skew_dte_info']['live_r1']}` จุด, พิกัด `Buy {mvc['skew_dte_info']['live_buy1']} / Sell {mvc['skew_dte_info']['live_sell1']}`)\n"
-        f"   • *ความผันผวนสด & การเอียงของเส้น IV*: `IV เช้า {snap.open_iv:.2f}%` -> `ATM Vol สด {snap.atm_iv:.2f}%` เทียบ `Vol Settle {snap.vol_settle_atm:.2f}%` (`Vol Chg {snap.vol_chg:+.2f}%`) | {mvc['skew_dte_info']['skew_direction']} (`Put Wing {mvc['skew_dte_info']['put_w_live']}` vs `Call Wing {mvc['skew_dte_info']['call_w_live']}`) | สถานะ `{m4['quadrant']}`\n"
-        f"   • *เข็มทิศลำดับความสำคัญรอบนี้*: {priority_note}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 *2. จุดสนใจหลักที่ควรเข้า + โอกาสชนะ + เหตุผลทำไมต้องเข้า (คัดเน้นๆ จากทุกโมดูล)*:\n\n"
-        f"{card_buy_1}\n\n"
-        f"{card_buy_2}\n\n"
-        f"{card_sell_1}\n\n"
-        f"{card_sell_2}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🧭 *3. แผนการเล่นสรุปทีละขั้นจากราคาปัจจุบัน (`{spot:,.2f}`) (Step-by-Step Execution Plan)*:\n"
-        f"   1️⃣ *ณ ราคาปัจจุบัน (`{spot:,.2f}`)*: {exact_calc['immediate_verdict']}\n"
-        f"   2️⃣ *แผนเมื่อราคาย่อลงด้านล่าง (ฝั่ง BUY)*:\n"
-        f"      • ด่านแรก: ตั้งรับ BUY ที่ *`{buy_first['entry_spot']}`* เก็บเป้า `{buy_first['tp1']} / {buy_first['tp2']}` (SL ปกติ `{buy_first['sl_bozovic']}` หรือคัตสลับ SELL ทบ 2x ที่ `{buy_first['sl1']}`)\n"
-        f"      • ด่านคำใหญ่ประจำวัน: หากไหลลึกถึงโซนสังหาร `2SD BUY` ให้เข้า BUY ไม้หลักที่ *`{tb['buy_2sd']:,.2f}`* เก็บเป้าใหญ่ `{tb['buy_2sd']+15:,.2f} / {tb['buy_2sd']+25:,.2f}` (SL ปกติ `{tb['buy_2sd']-8:,.2f}`)\n"
-        f"   3️⃣ *แผนเมื่อราคาดีดขึ้นด้านบน (ฝั่ง SELL)*:\n"
-        f"      • ด่านแรก: ตั้งดัก SELL ที่ *`{sell_first['entry_spot']}`* เก็บเป้า `{sell_first['tp1']} / {sell_first['tp2']}` (SL ปกติ `{sell_first['sl_bozovic']}` หรือคัตสลับ BUY ทบ 2x ที่ `{sell_first['sl1']}`)\n"
-        f"      • ด่านคำใหญ่ประจำวัน: หากพุ่งชนโซนสังหาร `2SD SELL` ให้เข้า SELL ไม้หลักที่ *`{tb['sell_2sd']:,.2f}`* เก็บเป้าใหญ่ `{tb['sell_2sd']-15:,.2f} / {tb['sell_2sd']-25:,.2f}` (SL ปกติ `{tb['sell_2sd']+8:,.2f}`)\n"
-        f"   4️⃣ *ข้อห้ามเด็ดขาดในรอบนี้ (ป้องกันพอร์ตติดลบ)*:\n"
-        f"      • ❌ ห้ามกดเข้าสวนกลางอากาศในโซน `< ±0.5SD` รอบราคาเปิด (`{open_spot:,.2f}`) เพราะโอกาสแกว่งออกหา `±1SD` สูงถึง `84%`\n"
-        f"      • ❌ ห้ามไล่ทุบ SELL ซื้อ Put ที่แนวรับ `Put Wall ({ws['put_wall_spot']:,.2f}) / 1SD BUY ({tb['buy_1sd']:,.2f})` เพราะสถิติวิจัย Garmash/Vilkov ชนะแค่ `30%–40%`\n"
-        f"      • ❌ ห้ามถือลุ้นเป้าไกลเกิน `$50` โดยไม่ตั้ง Fixed TP `@ +$25` (เพราะโอกาสแตะเป้าไกลเกิน `$50` ตกฮวบเหลือแค่ `14%–45%`)"
+    def _easy_card(
+        badge: str,
+        t: Dict[str, object],
+        win_str: str,
+        why_1: str,
+        why_2: str,
+        why_3: str,
+    ) -> str:
+        d_now = round(abs(spot - float(t["entry_spot_num"])), 2)
+        return (
+            f"*{badge}*\n"
+            f"   • 📍 *จุดเข้า ({t['side']})*: *`{t['entry_spot']}`* _(ห่างราคาตอนนี้ `{d_now:.2f}` จุด | Futures `{t['entry_fut']}`)_\n"
+            f"   • 🎯 *เป้าทำกำไร (TP)*: {t['tp_line']}\n"
+            f"   • 🛑 *จุดตัดขาดทุน (SL)*: {t['sl_norm_line']}\n"
+            f"   • 🔄 *วิธีแก้พอร์ตถ้าผิดทาง*: {t['rec1_line']}\n"
+            f"   • 🏆 *โอกาสชนะ*: {win_str}\n"
+            f"   • 💡 *ทำไมต้องเข้าจุดนี้ (เหตุผลจากตลาดจริงตอนนี้)*:\n"
+            f"      1) {why_1}\n"
+            f"      2) {why_2}\n"
+            f"      3) {why_3}"
+        )
+
+    b1_card = _easy_card(
+        f"🟢 แผนดัก BUY จุดที่ 1 (แนวรับแรกใกล้ราคาปัจจุบันที่สุด): {buy_first['short_title']}",
+        buy_first,
+        b1_win,
+        f"*มีกำแพงคนตั้งรับจริง*: เป็นแนวรับด่านแรกของวันนี้ (`{buy_first['entry_spot']}`) ที่มีออเดอร์ฝั่ง Put คอยพยุงอยู่ใกล้กำแพง `Put Wall {ws['put_wall_spot']:,.2f}`",
+        f"*ราคาย่อลงมาลึกจนได้เปรียบ*: จุดนี้อยู่ต่ำกว่าราคาเปิดเช้า (`{open_spot:,.2f}`) ถึง `{open_spot - float(buy_first['entry_spot_num']):.2f}` จุด ตามสถิติเมื่อราคาลงมาโซนนี้แรงขายมักหมดและเด้งกลับสั้นๆ `$8–$25`",
+        f"*ความเสี่ยงต่ำ คุ้มค่า*: ใช้ SL ปกติแค่ `8` จุด (`{buy_first['sl_bozovic']}`) และมีจุดดูดราคา `Max Pain ({ws['max_pain_spot']:,.2f})` คอยดึงราคาขึ้นด้านบน",
     )
 
+    b2_card = _easy_card(
+        f"🔥 แผนดัก BUY จุดที่ 2 (ไม้เอกช้อนคำใหญ่ประจำวัน): {buy_2sd_ticket['short_title']}",
+        buy_2sd_ticket,
+        b2_win,
+        f"*โซนตึงตัวสุดขีดของวัน (-2SD)*: ราคาไม่ค่อยหลุดโซนนี้ (มีโอกาสลงมาถึงแค่ `26%–28%` ของวัน) ถ้าลงมาชนมักเกิดแรงซื้อสวนกลับคำใหญ่",
+        f"*รายใหญ่ต้องซื้อคืนเพื่อปิดความเสี่ยง*: เมื่อราคาลงลึกถึง `{buy_2sd_ticket['entry_spot']}` แล้วแรงขายหยุดลง ค่าความผันผวนที่ลดลงจะบังคับให้ผู้ดูแลสภาพคล่อง (Dealer) ต้องเข้าซื้อทองคำกลับทันที",
+        f"*เป้ากำไรคำใหญ่คุ้มความเสี่ยง*: ลุ้นเด้งทำกำไร `+15 ถึง +25 จุด` (`{buy_2sd_ticket['tp1']} / {buy_2sd_ticket['tp2']}`) โดยคุม SL ปกติเพียง `8` จุด",
+    )
+
+    s1_card = _easy_card(
+        f"🔴 แผนดัก SELL จุดที่ 1 (แนวต้านแรกใกล้ราคาปัจจุบันที่สุด): {sell_first['short_title']}",
+        sell_first,
+        s1_win,
+        f"*เป็นด่านต้านสำคัญด่านแรก*: พิกัด `{sell_first['entry_spot']}` อยู่สูงกว่าราคาเปิดเช้าถึง `+{float(sell_first['entry_spot_num']) - open_spot:.2f}` จุด ซึ่งเป็นจุดที่คนซื้อมาจากข้างล่างเริ่มเทขายทำกำไร",
+        f"*รถเริ่มหมดแรงไต่ความชัน*: ตามข้อมูลรอบนี้ กำแพงต้านใหญ่อยู่แถว `{ws['call_wall_spot']:,.2f}`–`{tb['sell_1sd']:,.2f}` เมื่อราคาวิ่งขึ้นมาชนโซนนี้แรงซื้อมักแผ่วและย่อตัวลง `$8–$25`",
+        f"*เก็บกำไรไว คุมความเสี่ยงง่าย*: ดัก SELL เก็บย่อที่ `{sell_first['tp1']} / {sell_first['tp2']}` โดยตั้ง SL ปกติไว้ที่ `{sell_first['sl_bozovic']}` (`+8` จุด)",
+    )
+
+    s2_card = _easy_card(
+        f"🔥 แผนดัก SELL จุดที่ 2 (ไม้เอกทุบคำใหญ่ประจำวัน): {sell_2sd_ticket['short_title']}",
+        sell_2sd_ticket,
+        s2_win,
+        f"*โซนซื้อมากเกินไปสุดขีด (+2SD)*: พิกัด `{sell_2sd_ticket['entry_spot']}` สูงกว่าราคาเปิดเช้าถึง `+{tb['range_2sd']:.2f}` จุด โอกาสที่ราคาจะวิ่งทะลุผ่านไปต่อในวันเดียวมีน้อยมาก",
+        f"*เลยกำแพง Call Wall ด้านบน*: อยู่สูงกว่ากำแพงต้าน `Call Wall ({ws['call_wall_spot']:,.2f})` ทำให้เกิดแรงเทขายป้องกันกำแพงจากฝั่งสถาบัน",
+        f"*ถือเอาเป้าลงคำใหญ่ได้*: เก็บกำไรขาลง `15 ถึง 25 จุด` (`{sell_2sd_ticket['tp1']} / {sell_2sd_ticket['tp2']}`) ด้วยโอกาสชนะสูงถึง `78.6%–91.4%`",
+    )
+
+    return (
+        f"🏆 *บทสรุปสุดท้าย: แผนการเล่นฟันธง (ฉบับเข้าใจง่าย — อิงราคาและสถานการณ์จริงหน้างาน)*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 *1. สถานการณ์จริงตอนนี้เกิดอะไรขึ้น? (ข้อมูลล่าสุด `{snap.round_str}`)*:\n"
+        f"   • *ราคาปัจจุบัน*: Spot XAU/USD อยู่ที่ *`{spot:,.2f}`* _(ราคาเปิดเช้าวันนี้คือ `{open_spot:,.2f}`, ตอนนี้ราคา{pos_vs_open_txt})_\n"
+        f"   • *กรอบวิ่งวันนี้ vs รอบปัจจุบัน*: กรอบหลักตอนเช้า (`DTE 0.8`) กว้าง `±{tb['range_1sd']:.2f}` จุด (`รับ {tb['buy_1sd']:,.2f} / ต้าน {tb['sell_1sd']:,.2f}`) ส่วนกรอบเวลาคงเหลือรอบนี้ (`DTE {snap.dte:.2f}`) บีบเหลือ `±{skew_info['live_r1']}` จุด (`รับ {skew_info['live_buy1']} / ต้าน {skew_info['live_sell1']}`)\n"
+        f"   • *คนในตลาดกำลังทำอะไร*: {flow_plain_txt}\n"
+        f"   • *อาการของเส้นความผันผวน (IV)*: {iv_plain_txt}\n\n"
+        f"🚦 *2. ฟันธงหน้างาน: ตอนนี้ควรทำอะไรทันที?*:\n"
+        f"   👉 {now_action_txt}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 *3. โพยจุดเข้าเทรดที่ดีที่สุด + โอกาสชนะ + เหตุผลที่เข้าใจง่าย*:\n\n"
+        f"{b1_card}\n\n"
+        f"{b2_card}\n\n"
+        f"{s1_card}\n\n"
+        f"{s2_card}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ *4. กฎเหล็ก 3 ข้อห้ามทำในรอบนี้ (เพื่อป้องกันพอร์ตติดลบ)*:\n"
+        f"   1️⃣ *ห้ามกดเข้ากลางทาง* แถวราคาเปิด (`{open_spot:,.2f}`) เด็ดขาด เพราะราคามีโอกาสแกว่งออกซ้าย–ขวาได้ถึง `84%` รอให้ราคาวิ่งมาชนจุดเข้าในโพยก่อนเท่านั้น\n"
+        f"   2️⃣ *ห้ามไล่กด SELL ตามน้ำเมื่อราคาลงมาถึงแนวรับล่าง* (`{ws['put_wall_spot']:,.2f}` / `{tb['buy_1sd']:,.2f}`) เพราะเป็นจุดที่คนรอช้อนซื้อ โอกาสแพ้สูงถึง `60%–70%`\n"
+        f"   3️⃣ *ตั้ง TP และ SL ตามตัวเลขในโพยทุกครั้ง* (ฝั่ง BUY เป้า TP สูงกว่าจุดเข้า / ฝั่ง SELL เป้า TP ต่ำกว่าจุดเข้า) ไม่ถือลุ้นไกลเกิน `+25 จุด` โดยไม่ล็อกกำไร"
+    )
 
 def build_clean_section_messages(snap: HizeirisSnapshot, exact_calc: Dict, round_history: List[Dict], ai_audit_text: str = "") -> List[str]:
     tb = exact_calc["sd_table_exact"]
@@ -2730,44 +2915,44 @@ def run_once():
         snap = HizeirisSnapshot(
             contract_name="G3WX6",
             timestamp=datetime.now().strftime("%Y-%m-%d %H:%M"),
-            round_str="รอบ 80/80",
-            futures_price=3856.8,
-            latest_gc_fut=3856.8,
-            future_chg=-12.9,
-            daily_open_fut=3869.70,
-            daily_open_spot=3867.20,
-            open_iv=27.09,
+            round_str="รอบ 85/85 เวลา 07:30 (เข้า 07:32)",
+            futures_price=3851.9,
+            latest_gc_fut=3851.9,
+            future_chg=-3.3,
+            daily_open_fut=3855.20,
+            daily_open_spot=3852.70,
+            open_iv=28.59,
             open_source="ตาราง SD·diff หน้าเว็บ Hizeiris (Exact Table Lock)",
             diff=tg_diff or 2.50,
-            raw_market_diff=2.58,
-            diff_source="แท็บ SD·diff (ตลาดจริง 2.58 -> ปัด 2.50)",
-            dte=0.86,
+            raw_market_diff=2.53,
+            diff_source="แท็บ SD·diff (ตลาดจริง 2.53 -> ปัด 2.50)",
+            dte=0.75,
             fixed_dte=CONFIG["FIXED_DTE"],
-            atm_iv=27.09,
+            atm_iv=28.59,
             vol_chg=0.00,
-            vol_settle_atm=27.09,
-            intraday_c=2832,
-            intraday_p=1697,
-            intraday_pc=0.60,
+            vol_settle_atm=28.59,
+            intraday_c=1954,
+            intraday_p=1051,
+            intraday_pc=0.54,
             oi_c=1014,
-            oi_p=884,
+            oi_p=887,
             oi_pc=0.87,
-            churn_c=0.54,
-            churn_p=0.23,
-            churn_str="C 0.54 / P 0.23",
+            churn_c=0.56,
+            churn_p=0.31,
+            churn_str="C 0.56 / P 0.31",
             put_wall=3800.0,
             put_wall_pc="Put wall 3800 (385/42)",
             call_wall=3935.0,
             call_wall_pc="Call wall 3935 (41/690)",
             max_pain=3900.0,
-            top_inflow_text="โฟลว์รายวัน Intraday C 2,832 vs P 1,697 (P/C 0.60)",
-            top_oi_text="ฐานสะสม OI C 1,014 vs P 884 (P/C 0.87) | Put Wall 3800 / Call Wall 3935",
-            cme_vol_series_text="G3WX6 DTE 0.86 IV 27.09% (Normal Contango)",
+            top_inflow_text="โฟลว์รายวัน Intraday C 1,954 vs P 1,051 (P/C 0.54)",
+            top_oi_text="ฐานสะสม OI C 1,014 vs P 887 (P/C 0.87) | Put Wall 3800 / Call Wall 3935",
+            cme_vol_series_text="G3WX6 DTE 0.75 IV 28.59% (Normal Contango)",
             pillar_labels_text="385/42, 56/24, 59/25, 39/361, 41/690, 48/532",
             sd_diff_table={
-                "range_1sd": 49.08, "buy_1sd": 3818.12, "sell_1sd": 3916.28,
-                "range_2sd": 98.16, "buy_2sd": 3769.04, "sell_2sd": 3965.36,
-                "range_3sd": 147.23, "buy_3sd": 3719.97, "sell_3sd": 4014.43,
+                "range_1sd": 51.60, "buy_1sd": 3801.10, "sell_1sd": 3904.30,
+                "range_2sd": 103.20, "buy_2sd": 3749.50, "sell_2sd": 3955.90,
+                "range_3sd": 154.80, "buy_3sd": 3697.90, "sell_3sd": 4007.50,
             },
         )
     else:
@@ -2895,9 +3080,10 @@ def start_scheduler():
             sleep_sec = max(target_sec, 120)
             print(f"⏰ ช่วงเปิดตลาดเช้า: รอซิงค์ราคาเปิด 06:30 น. จากเว็บ Hizeiris อีกครั้งใน {sleep_sec // 60} นาที {sleep_sec % 60} วินาที...")
         else:
-            sec_into_half_hour = (now.minute % 30) * 60 + now.second
-            sleep_sec = max(1800 - sec_into_half_hour, 300)
-            print(f"⏳ รอส่งรายงานรอบถัดไปในอีก {sleep_sec // 60} นาที {sleep_sec % 60} วินาที...")
+            # ตื่นที่นาที :04 และ :34 ของทุกชั่วโมง (หลังข้อมูลรอบ :00 เข้าเว็บตอน :02.1 และรอบ :30 เข้าเว็บตอน :32.1 เสร็จแล้ว 100%)
+            sec_since_target = ((now.minute - 4) % 30) * 60 + now.second
+            sleep_sec = max(1800 - sec_since_target, 300)
+            print(f"⏳ รอส่งรายงานรอบถัดไป (ตรงจังหวะหลังเว็บอัปเดตรอบ :04/:34) ในอีก {sleep_sec // 60} นาที {sleep_sec % 60} วินาที...")
         for _ in range(sleep_sec):
             if STOP_REQUESTED:
                 break
