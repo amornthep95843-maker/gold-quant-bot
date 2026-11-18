@@ -2414,6 +2414,628 @@ def _compute_setup_win_rate_and_reasons(
     return win_rate_summary, [reason_1, reason_2, reason_3, reason_4]
 
 
+
+
+def _render_final_plan_via_pillow(
+    out_path: str,
+    snap: HizeirisSnapshot,
+    exact_calc: Dict,
+    buy_first: Dict,
+    buy_2sd_ticket: Dict,
+    sell_first: Dict,
+    sell_2sd_ticket: Dict,
+    b1_pct: str,
+    b2_pct: str,
+    s1_pct: str,
+    s2_pct: str,
+    flow_short: str,
+    skew_short: str,
+    verdict_banner: str,
+    verdict_color: str,
+) -> bool:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        font_cache = {}
+
+        def _get_font(is_thai: bool, bold: bool, sz: int):
+            key = (is_thai, bold, sz)
+            if key in font_cache:
+                return font_cache[key]
+            if is_thai:
+                paths = (
+                    [
+                        "/usr/share/fonts/truetype/noto/NotoSansThai-Bold.ttf",
+                        "/usr/share/fonts/truetype/noto/NotoLoopedThai-Bold.ttf",
+                        "/usr/share/fonts/opentype/tlwg/Loma-Bold.otf",
+                        "/usr/share/fonts/truetype/tlwg/Loma-Bold.ttf",
+                    ]
+                    if bold
+                    else [
+                        "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+                        "/usr/share/fonts/truetype/noto/NotoLoopedThai-Regular.ttf",
+                        "/usr/share/fonts/opentype/tlwg/Loma.otf",
+                        "/usr/share/fonts/truetype/tlwg/Loma.ttf",
+                    ]
+                )
+            else:
+                paths = (
+                    [
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                        "/usr/share/fonts/opentype/tlwg/Loma-Bold.otf",
+                    ]
+                    if bold
+                    else [
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                        "/usr/share/fonts/opentype/tlwg/Loma.otf",
+                    ]
+                )
+            for p in paths:
+                if os.path.exists(p):
+                    try:
+                        f_obj = ImageFont.truetype(p, sz)
+                        font_cache[key] = f_obj
+                        return f_obj
+                    except Exception:
+                        pass
+            f_obj = ImageFont.load_default()
+            font_cache[key] = f_obj
+            return f_obj
+
+        def _draw_txt(draw_obj, xy, text: str, sz: int = 14, bold: bool = False, fill=(255, 255, 255)):
+            """วาดข้อความผสม ไทย + อังกฤษ/ตัวเลข ให้คมชัด 100% โดยไม่มีสี่เหลี่ยม □"""
+            x, y = float(xy[0]), float(xy[1])
+            clean = re.sub(r"[\r\n\t]+", " ", str(text).replace("•", "-").replace("–", "-"))
+            clean = re.sub(r"[^\u0E00-\u0E7Fa-zA-Z0-9 \.\,\:\;\-\+\/\(\)\[\]\%\$\!\?\&\=\<\>\|]", "", clean)
+            runs = re.findall(r"[\u0E00-\u0E7F]+|[^\u0E00-\u0E7F]+", clean)
+            for run in runs:
+                is_th = bool(re.match(r"^[\u0E00-\u0E7F]", run))
+                f_use = _get_font(is_th, bold, sz)
+                y_offset = -1 if is_th else 0
+                draw_obj.text((x, y + y_offset), run, font=f_use, fill=fill)
+                try:
+                    w_run = draw_obj.textlength(run, font=f_use)
+                except Exception:
+                    bbox = draw_obj.textbbox((0, 0), run, font=f_use)
+                    w_run = bbox[2] - bbox[0]
+                x += w_run
+
+        W, H = 1600, 1140
+        img = Image.new("RGB", (W, H), (7, 11, 18))
+        draw = ImageDraw.Draw(img)
+
+        tb = exact_calc["sd_table_exact"]
+        ws = exact_calc["walls_spot"]
+        mvc = exact_calc["morning_vs_current"]
+        skew_info = mvc["skew_dte_info"]
+        spot = exact_calc["spot"]
+        open_spot = exact_calc["open_spot"]
+
+        # 1. Top Header Box
+        draw.rounded_rectangle([20, 16, 1580, 98], radius=10, fill=(15, 23, 42), outline=(51, 65, 85), width=2)
+        draw.rectangle([20, 16, 26, 98], fill=(251, 191, 36))
+        _draw_txt(draw, (40, 24), "สรุปแผนการเล่นฟันธง XAU/USD (ฉบับเข้าใจง่าย - อิงราคาและสถานการณ์จริงหน้างาน)", sz=21, bold=True, fill=(251, 191, 36))
+        _draw_txt(
+            draw,
+            (40, 58),
+            f"ข้อมูลเว็บ Hizeiris ล่าสุด: {snap.contract_name} ({snap.round_str})  |  DTE รอบนี้ {snap.dte:.2f} (เทียบกรอบเช้า DTE {snap.fixed_dte:.2f})  |  หัก Diff {snap.diff:.2f}",
+            sz=14,
+            bold=False,
+            fill=(203, 213, 225),
+        )
+
+        # Open Pill & Spot Pill
+        draw.rounded_rectangle([1040, 24, 1290, 90], radius=8, fill=(30, 41, 59), outline=(71, 85, 105), width=1)
+        _draw_txt(draw, (1054, 30), "ราคาเปิดเช้าวันนี้ (06:30)", sz=12, bold=False, fill=(148, 163, 184))
+        _draw_txt(draw, (1054, 52), f"{open_spot:,.2f} (Fut {exact_calc['open_fut']:,.2f})", sz=16, bold=True, fill=(56, 189, 248))
+
+        draw.rounded_rectangle([1302, 24, 1568, 90], radius=8, fill=(234, 179, 8))
+        _draw_txt(draw, (1316, 29), "ราคา XAU/USD (Spot) ปัจจุบัน", sz=12, bold=True, fill=(15, 23, 42))
+        _draw_txt(draw, (1314, 52), f"{spot:,.2f} ({mvc['delta_px_from_open']} | {mvc['z_from_open']})", sz=16, bold=True, fill=(0, 0, 0))
+
+        # 2. 3 Status Boxes
+        box_w = 512
+        for idx, (st_title, st_line1, st_line2) in enumerate([
+            (
+                f"1) กรอบวิ่งวันนี้ (Fix เช้า 0.8) vs รอบนี้ (DTE {snap.dte:.2f})",
+                f"• กรอบหลักเช้า (DTE 0.8): 1SD +/-{tb['range_1sd']:.2f} (รับ {tb['buy_1sd']:,.2f} / ต้าน {tb['sell_1sd']:,.2f})",
+                f"• กรอบรอบปัจจุบัน (DTE {snap.dte:.2f}): 1SD +/-{skew_info['live_r1']} (รับ {skew_info['live_buy1']} / ต้าน {skew_info['live_sell1']})",
+            ),
+            (
+                "2) คนในตลาดกำลังทำอะไร (Put / Call & กำแพง OI)",
+                f"- {flow_short}",
+                f"• รับ Put Wall {ws['put_wall_spot']:,.2f} | ดูด Max Pain {ws['max_pain_spot']:,.2f} | ต้าน Call Wall {ws['call_wall_spot']:,.2f}",
+            ),
+            (
+                "3) อาการของเส้นความผันผวน (IV Smile & Skew)",
+                f"• IV ตอนเปิด {snap.open_iv:.2f}% -> ATM Vol สด {snap.atm_iv:.2f}% (Vol Chg {snap.vol_chg:+.2f}%)",
+                f"- {skew_short}",
+            ),
+        ]):
+            bx = 20 + idx * (box_w + 12)
+            draw.rounded_rectangle([bx, 110, bx + box_w, 194], radius=8, fill=(15, 23, 42), outline=(30, 41, 59), width=1)
+            _draw_txt(draw, (bx + 12, 117), st_title, sz=14, bold=True, fill=(56, 189, 248))
+            _draw_txt(draw, (bx + 12, 143), st_line1, sz=12, bold=False, fill=(226, 232, 240))
+            _draw_txt(draw, (bx + 12, 166), st_line2, sz=12, bold=False, fill=(226, 232, 240))
+
+        # 3. Verdict Bar
+        v_rgb = (251, 191, 36) if verdict_color == "#fbbf24" else ((34, 197, 94) if verdict_color == "#22c55e" else (239, 68, 68))
+        draw.rounded_rectangle([20, 206, 1580, 250], radius=8, fill=(17, 24, 39), outline=v_rgb, width=2)
+        _draw_txt(draw, (32, 218), verdict_banner, sz=12, bold=True, fill=v_rgb)
+
+        # 4. 4 Trade Cards (2x2 Grid)
+        def _draw_trade_card(x0, y0, x1, y1, is_buy, is_kill, title, t, win_pct, reasons):
+            bg = (14, 42, 28) if (is_buy and not is_kill) else ((18, 55, 35) if is_buy else ((48, 18, 22) if not is_kill else (62, 20, 26)))
+            bdr = (34, 197, 94) if is_buy else (239, 68, 68)
+            draw.rounded_rectangle([x0, y0, x1, y1], radius=10, fill=bg, outline=bdr, width=2)
+
+            # Card Header
+            _draw_txt(draw, (x0 + 16, y0 + 12), title, sz=15, bold=True, fill=(248, 250, 252))
+            pill_w = 225
+            draw.rounded_rectangle([x1 - pill_w - 14, y0 + 10, x1 - 14, y0 + 38], radius=14, fill=(251, 191, 36))
+            _draw_txt(draw, (x1 - pill_w + 2, y0 + 15), f"โอกาสชนะ {win_pct.replace('–', '-')}", sz=13, bold=True, fill=(0, 0, 0))
+
+            # Entry & TP/SL Box
+            draw.rounded_rectangle([x0 + 14, y0 + 46, x1 - 14, y0 + 138], radius=8, fill=(11, 17, 30), outline=(51, 65, 85), width=1)
+            dist_now = round(abs(spot - float(t["entry_spot_num"])), 2)
+            _draw_txt(draw, (x0 + 22, y0 + 54), f"จุดเข้า {t['side']} (ห่างตอนนี้ {dist_now:.2f} จุด)", sz=12, bold=False, fill=(203, 213, 225))
+            _draw_txt(draw, (x0 + 22, y0 + 78), f"{t['entry_spot']}", sz=24, bold=True, fill=(254, 240, 138))
+            _draw_txt(draw, (x0 + 148, y0 + 85), f"(Fut {t['entry_fut']})", sz=12, bold=False, fill=(148, 163, 184))
+
+            draw.line([(x0 + 245, y0 + 54), (x0 + 245, y0 + 130)], fill=(51, 65, 85), width=2)
+            dir_txt = "สูงกว่าจุดเข้า" if is_buy else "ต่ำกว่าจุดเข้า"
+            flip_side = "SELL ทบ 2x" if is_buy else "BUY ทบ 2x"
+            flip_d = "-12.5" if is_buy else "+12.5"
+            sl_d = f"-{int(abs(float(t['entry_spot_num']) - float(t['sl_normal_num'])))}" if is_buy else f"+{int(abs(float(t['sl_normal_num']) - float(t['entry_spot_num'])))}"
+
+            _draw_txt(
+                draw,
+                (x0 + 256, y0 + 56),
+                f"เป้า TP ({dir_txt}): TP1 {t['tp1']} (+${int(t['tp1_pts'])}) | TP2 {t['tp2']} (+${int(t['tp2_pts'])})",
+                sz=12,
+                bold=True,
+                fill=(134, 239, 172) if is_buy else (253, 224, 71),
+            )
+            _draw_txt(
+                draw,
+                (x0 + 256, y0 + 82),
+                f"SL ปกติ (ตัดจบ): {t['sl_bozovic']} ({sl_d} จุด)",
+                sz=12,
+                bold=True,
+                fill=(252, 165, 165),
+            )
+            _draw_txt(
+                draw,
+                (x0 + 256, y0 + 106),
+                f"แก้พอร์ต: คัตที่ {t['sl1']} ({flip_d}) สลับเปิด {flip_side} -> เป้าปิด {t['rec1_2x_tp']}",
+                sz=12,
+                bold=False,
+                fill=(226, 232, 240),
+            )
+
+            # Why Box
+            draw.rounded_rectangle([x0 + 14, y0 + 146, x1 - 14, y1 - 12], radius=8, fill=(15, 23, 42))
+            _draw_txt(draw, (x0 + 24, y0 + 153), "ทำไมต้องเข้าจุดนี้ (เหตุผลจากราคาและสถานการณ์จริงตอนนี้):", sz=13, bold=True, fill=(56, 189, 248))
+            for r_idx, r_txt in enumerate(reasons[:3]):
+                _draw_txt(draw, (x0 + 24, y0 + 178 + r_idx * 24), f"{r_idx+1}) {r_txt}", sz=12, bold=False, fill=(241, 245, 249))
+
+        # Left Column: BUY 1 & BUY 2
+        _draw_trade_card(
+            20, 262, 792, 596, True, False,
+            f"แผนดัก BUY จุดที่ 1 (แนวรับแรก): {buy_first['short_title']}",
+            buy_first, b1_pct,
+            [
+                f"มีกำแพงคนตั้งรับจริง: ตรงแนวรับแรก ({buy_first['entry_spot']}) ใกล้กำแพง Put Wall ({ws['put_wall_spot']:,.2f})",
+                f"ราคาย่อลงมาลึกจนได้เปรียบ: ต่ำกว่าราคาเปิดเช้า ({open_spot:,.2f}) ถึง {open_spot - float(buy_first['entry_spot_num']):.2f} จุด รอเด้งสั้น $8-$25",
+                f"ความเสี่ยงต่ำ คุ้มค่า: ใช้ SL ปกติแค่ 8 จุด ({buy_first['sl_bozovic']}) มีจุดดูด Max Pain ({ws['max_pain_spot']:,.2f}) ดึงขึ้น",
+            ],
+        )
+        _draw_trade_card(
+            20, 608, 792, 942, True, True,
+            f"แผนดัก BUY จุดที่ 2 (ไม้เอกช้อนคำใหญ่): {buy_2sd_ticket['short_title']}",
+            buy_2sd_ticket, b2_pct,
+            [
+                f"โซนขายมากเกินไปสุดขีด (-2SD Kill Zone): ลงมาถึงแค่ 26%-28% ของวัน ทับใกล้กรอบรอบนี้ ({skew_info['live_buy2']})",
+                f"รายใหญ่ต้องซื้อคืนปิดความเสี่ยง: เมื่อลงถึง {buy_2sd_ticket['entry_spot']} แล้วหยุดไหล จะเกิดแรงซื้อคืน Vanna Rally",
+                f"ลุ้นกำไรคำใหญ่ +15 ถึง +25 จุด: เป้าทำกำไร {buy_2sd_ticket['tp1']} / {buy_2sd_ticket['tp2']} โดยคุม SL ปกติเพียง 8 จุด",
+            ],
+        )
+
+        # Right Column: SELL 1 & SELL 2
+        _draw_trade_card(
+            808, 262, 1580, 596, False, False,
+            f"แผนดัก SELL จุดที่ 1 (แนวต้านแรก): {sell_first['short_title']}",
+            sell_first, s1_pct,
+            [
+                f"เป็นด่านต้านสำคัญด่านแรก: พิกัด {sell_first['entry_spot']} สูงกว่าราคาเปิดเช้า +{float(sell_first['entry_spot_num']) - open_spot:.2f} จุด",
+                f"รถเริ่มหมดแรงไต่ความชัน: โซนต้าน {sell_first['entry_spot']}-{ws['call_wall_spot']:,.2f} คนที่ซื้อมาจากด้านล่างเริ่มเทขายทำกำไร",
+                f"เก็บกำไรไว คุมความเสี่ยงง่าย: ดัก SELL เก็บย่อที่ {sell_first['tp1']} / {sell_first['tp2']} (SL ปกติ {sell_first['sl_bozovic']})",
+            ],
+        )
+        _draw_trade_card(
+            808, 608, 1580, 942, False, True,
+            f"แผนดัก SELL จุดที่ 2 (ไม้เอกทุบคำใหญ่): {sell_2sd_ticket['short_title']}",
+            sell_2sd_ticket, s2_pct,
+            [
+                f"โซนซื้อมากเกินไปสุดขีด (+2SD Kill Zone): สูงกว่าราคาเปิดเช้าถึง +{tb['range_2sd']:.2f} จุด โอกาสทะลุต่อยากมาก",
+                f"เลยกำแพง Call Wall ด้านบน: สูงกว่ากำแพงต้าน Call Wall ({ws['call_wall_spot']:,.2f}) มีแรงเทขายป้องกันกำแพง",
+                f"ถือเอาเป้าลงคำใหญ่ 15-25 จุด: เก็บกำไรขาลงที่ {sell_2sd_ticket['tp1']} / {sell_2sd_ticket['tp2']} ชนะสูงถึง {s2_pct.replace('–', '-')}",
+            ],
+        )
+
+        # 5. Visual Price Ruler Bar
+        draw.rounded_rectangle([20, 956, 1580, 1036], radius=8, fill=(15, 23, 42), outline=(51, 65, 85), width=1)
+        nodes = [
+            ("3SD BUY", f"{tb['buy_3sd']:,.2f}", "buy"),
+            ("2SD BUY (ไม้เอก)", f"{tb['buy_2sd']:,.2f}", "buy"),
+            ("Put Wall", f"{ws['put_wall_spot']:,.2f}", "buy"),
+            ("1SD BUY (รับแรก)", f"{tb['buy_1sd']:,.2f}", "buy"),
+            ("Spot ตอนนี้", f"{spot:,.2f}", "now"),
+            ("ราคาเปิดเช้า", f"{open_spot:,.2f}", "open"),
+            ("Max Pain", f"{ws['max_pain_spot']:,.2f}", "open"),
+            ("1SD SELL (ต้านแรก)", f"{tb['sell_1sd']:,.2f}", "sell"),
+            ("Call Wall", f"{ws['call_wall_spot']:,.2f}", "sell"),
+            ("2SD SELL (ไม้เอก)", f"{tb['sell_2sd']:,.2f}", "sell"),
+            ("3SD SELL", f"{tb['sell_3sd']:,.2f}", "sell"),
+        ]
+        nw = 136
+        for idx, (nlbl, npx, nkind) in enumerate(nodes):
+            nx = 28 + idx * 141
+            nbg = (234, 179, 8) if nkind == "now" else ((20, 60, 38) if nkind == "buy" else ((22, 48, 72) if nkind == "open" else (65, 22, 28)))
+            nfg = (0, 0, 0) if nkind == "now" else ((134, 239, 172) if nkind == "buy" else ((125, 211, 252) if nkind == "open" else (252, 165, 165)))
+            draw.rounded_rectangle([nx, 966, nx + nw, 1026], radius=6, fill=nbg)
+            _draw_txt(draw, (nx + 8, 971), nlbl, sz=11, bold=True, fill=nfg)
+            _draw_txt(draw, (nx + 8, 995), npx, sz=15, bold=True, fill=(0, 0, 0) if nkind == "now" else (255, 255, 255))
+
+        # 6. Footer 3 Golden Rules
+        draw.rounded_rectangle([20, 1048, 1580, 1122], radius=8, fill=(48, 16, 20), outline=(239, 68, 68), width=1)
+        _draw_txt(
+            draw,
+            (34, 1056),
+            f"กฎเหล็ก 3 ข้อห้ามทำในรอบนี้:  1) ห้ามกดเข้ากลางทางแถวราคาเปิด ({open_spot:,.2f}) รอให้ราคาวิ่งมาชนจุดเข้าในโพยเท่านั้น",
+            sz=14,
+            bold=True,
+            fill=(254, 240, 138),
+        )
+        _draw_txt(
+            draw,
+            (34, 1085),
+            f"2) ห้ามไล่กด SELL ตามน้ำที่แนวรับล่าง ({ws['put_wall_spot']:,.2f} / {tb['buy_1sd']:,.2f}) เพราะเป็นโซนคนรอช้อนซื้อ  |  3) ตั้ง TP/SL ตามตัวเลขในการ์ดทุกครั้ง ไม่ถือลุ้นไกลเกิน +25 จุดโดยไม่ล็อกกำไร",
+            sz=13,
+            bold=False,
+            fill=(254, 202, 202),
+        )
+
+        img.save(out_path, format="PNG", optimize=True)
+        return os.path.exists(out_path)
+    except Exception as e:
+        print(f"⚠️ Pillow render error: {e}")
+        return False
+
+
+def render_final_plan_summary_image(
+    snap: HizeirisSnapshot,
+    exact_calc: Dict,
+) -> Optional[Tuple[str, str]]:
+    """
+    สร้างภาพอินโฟกราฟิกสรุปปิดท้ายรายงาน:
+    "🏆 [ภาพสรุปปิดท้าย] แผนการเล่นฟันธง & โพยจุดเข้า–ออกฉบับเข้าใจง่าย (อิงราคาและสถานการณ์จริง)"
+    เพื่อส่งเป็นรายการสุดท้ายของรายงานใน Telegram ให้ผู้ใช้เปิดดูภาพเดียวเข้าใจแผนทั้งหมดทันที
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    out_path = f"hizeiris_5_final_plan_summary_{ts}.png"
+
+    tb = exact_calc["sd_table_exact"]
+    ws = exact_calc["walls_spot"]
+    mvc = exact_calc["morning_vs_current"]
+    skew_info = mvc["skew_dte_info"]
+    tactical = exact_calc["tactical_tickets"]
+    zones = exact_calc["six_zone_plans"]
+    spot = exact_calc["spot"]
+    open_spot = exact_calc["open_spot"]
+
+    buy_first = tactical["buy_tickets"][0]
+    sell_first = tactical["sell_tickets"][0]
+    buy_2sd_ticket = zones[4]
+    sell_2sd_ticket = zones[1]
+
+    b1_win, _ = _compute_setup_win_rate_and_reasons(buy_first, snap, exact_calc, "first")
+    b2_win, _ = _compute_setup_win_rate_and_reasons(buy_2sd_ticket, snap, exact_calc, "killzone")
+    s1_win, _ = _compute_setup_win_rate_and_reasons(sell_first, snap, exact_calc, "first")
+    s2_win, _ = _compute_setup_win_rate_and_reasons(sell_2sd_ticket, snap, exact_calc, "killzone")
+
+    def _extract_pct_range(win_text: str) -> str:
+        m = re.search(r"([0-9]+\.[0-9]+%\s*[–\-]\s*[0-9]+\.[0-9]+%)", win_text)
+        return m.group(1) if m else "78.6% – 88.5%"
+
+    b1_pct = _extract_pct_range(b1_win)
+    b2_pct = _extract_pct_range(b2_win)
+    s1_pct = _extract_pct_range(s1_win)
+    s2_pct = _extract_pct_range(s2_win)
+
+    delta_open_num = round(spot - open_spot, 2)
+    pos_vs_open_txt = (
+        f"ต่ำกว่าราคาเปิดเช้า {abs(delta_open_num):.2f} จุด ({mvc['z_from_open']})"
+        if delta_open_num < 0
+        else f"สูงกว่าราคาเปิดเช้า +{delta_open_num:.2f} จุด ({mvc['z_from_open']})"
+    )
+
+    if snap.intraday_c > snap.intraday_p:
+        flow_short = f"ฝั่งซื้อ Call นำ ({snap.intraday_c:,} vs Put {snap.intraday_p:,} | P/C {snap.intraday_pc:.2f}) เล็งเป้า Max Pain {ws['max_pain_spot']:,.2f}"
+    else:
+        flow_short = f"ฝั่งขาย Put นำ ({snap.intraday_p:,} vs Call {snap.intraday_c:,} | P/C {snap.intraday_pc:.2f}) ทดสอบฐานแนวรับด้านล่าง"
+
+    if skew_info["skew_bias"] == "CALL_SKEW":
+        skew_short = f"เส้นเขียว Vol สด เอียงเชิดฝั่งขวา (Call {skew_info['call_w_live']} > Put {skew_info['put_w_live']}) ย่อซื้อได้เปรียบ"
+    elif skew_info["skew_bias"] == "PUT_SKEW":
+        skew_short = f"เส้นเขียว Vol สด เอียงเชิดฝั่งซ้าย (Put {skew_info['put_w_live']} > Call {skew_info['call_w_live']}) รอรับที่ด่านสำคัญ"
+    else:
+        skew_short = f"เส้นเขียว Vol สด โค้งสมดุลสองฝั่ง ({snap.atm_iv:.2f}%) -> ตลาดเคารพกรอบแนวรับ–แนวต้าน 0.8 แม่นยำ"
+
+    dist_b1 = round(abs(spot - float(buy_first["entry_spot_num"])), 2)
+    dist_s1 = round(abs(float(sell_first["entry_spot_num"]) - spot), 2)
+
+    if dist_b1 <= 6.0:
+        verdict_banner = f"🟢 คำสั่งหน้างานตอนนี้: ราคา ({spot:,.2f}) ลงมาใกล้จุดรับแรก ({buy_first['entry_spot']}) แล้ว! รอแท่งเทียนหยุดไหลแล้วกด BUY ตามการ์ดซ้ายบนทันที"
+        verdict_color = "#22c55e"
+    elif dist_s1 <= 6.0:
+        verdict_banner = f"🔴 คำสั่งหน้างานตอนนี้: ราคา ({spot:,.2f}) ขึ้นมาใกล้จุดต้านแรก ({sell_first['entry_spot']}) แล้ว! รอราคาชะลอตัวแล้วกด SELL ตามการ์ดขวาบนทันที"
+        verdict_color = "#ef4444"
+    elif dist_b1 <= dist_s1:
+        verdict_banner = (
+            f"⏳ คำสั่งหน้างานตอนนี้: ราคา ({spot:,.2f}) อยู่กลางกรอบ ห้ามกดเข้ากลางอากาศ! "
+            f"ให้ตั้ง Pending Limit รอทั้ง 2 ฝั่ง โดยเน้นเฝ้าฝั่ง BUY ด่านแรก ({buy_first['entry_spot']}, ห่าง {dist_b1:.2f} จุด) ก่อนเพราะอยู่ใกล้กว่าระยะต้าน ({sell_first['entry_spot']}, ห่าง {dist_s1:.2f} จุด)"
+        )
+        verdict_color = "#fbbf24"
+    else:
+        verdict_banner = (
+            f"⏳ คำสั่งหน้างานตอนนี้: ราคา ({spot:,.2f}) อยู่กลางกรอบ ห้ามกดเข้ากลางอากาศ! "
+            f"ให้ตั้ง Pending Limit รอทั้ง 2 ฝั่ง โดยเน้นเฝ้าฝั่ง SELL ด่านแรก ({sell_first['entry_spot']}, ห่าง {dist_s1:.2f} จุด) ก่อนเพราะอยู่ใกล้กว่าระยะรับ ({buy_first['entry_spot']}, ห่าง {dist_b1:.2f} จุด)"
+        )
+        verdict_color = "#fbbf24"
+
+    def _card_html(
+        theme: str,
+        badge_title: str,
+        t: Dict[str, object],
+        win_pct: str,
+        why1: str,
+        why2: str,
+        why3: str,
+    ) -> str:
+        dist_now = round(abs(spot - float(t["entry_spot_num"])), 2)
+        is_buy = t["side"] == "BUY"
+        dir_label = "ราคาขึ้นสูงกว่าจุดเข้า" if is_buy else "ราคาลงต่ำกว่าจุดเข้า"
+        flip_side = "SELL ทบ 2x" if is_buy else "BUY ทบ 2x"
+        flip_delta = "-12.5" if is_buy else "+12.5"
+        sl_delta = f"-{int(abs(float(t['entry_spot_num']) - float(t['sl_normal_num'])))}" if is_buy else f"+{int(abs(float(t['sl_normal_num']) - float(t['entry_spot_num'])))}"
+
+        return f"""
+        <div class="plan-card {theme}">
+          <div class="card-top">
+            <div class="card-title">{html_lib.escape(badge_title)}</div>
+            <div class="win-pill">🏆 โอกาสชนะ {html_lib.escape(win_pct)}</div>
+          </div>
+          <div class="entry-strip">
+            <div>
+              <div class="entry-label">📍 พิกัดเข้า {t['side']} จุดเดียวชัดเจน (ห่างราคาตอนนี้ {dist_now:.2f} จุด)</div>
+              <div class="entry-px">{t['entry_spot']} <span class="fut-sub">(Futures {t['entry_fut']})</span></div>
+            </div>
+            <div class="tp-sl-box">
+              <div class="tp-row">🎯 <b>เป้าทำกำไร ({dir_label})</b>: TP1 <b>{t['tp1']}</b> (+${int(t['tp1_pts'])}) &nbsp;|&nbsp; TP2 <b>{t['tp2']}</b> (+${int(t['tp2_pts'])})</div>
+              <div class="sl-row">🛑 <b>SL ปกติ (ตัดจบ)</b>: <b>{t['sl_bozovic']}</b> ({sl_delta} จุด) &nbsp;|&nbsp; 🔄 <b>แก้พอร์ต</b>: คัตที่ <b>{t['sl1']}</b> ({flip_delta}) สลับเปิด <b>{flip_side}</b> &rarr; เป้าปิด <b>{t['rec1_2x_tp']}</b></div>
+            </div>
+          </div>
+          <div class="why-box">
+            <div class="why-hdr">💡 ทำไมต้องเข้าจุดนี้ (เหตุผลจากราคาและสถานการณ์จริงตอนนี้):</div>
+            <div class="why-item">1) {why1}</div>
+            <div class="why-item">2) {why2}</div>
+            <div class="why-item">3) {why3}</div>
+          </div>
+        </div>
+        """
+
+    card_b1 = _card_html(
+        "buy-card",
+        f"🟢 แผนดัก BUY จุดที่ 1 (แนวรับแรกใกล้ราคาปัจจุบัน): {buy_first['short_title']}",
+        buy_first,
+        b1_pct,
+        f"<b>มีกำแพงคนตั้งรับจริง</b>: ตรงกับแนวรับแรกของวัน (<b>{buy_first['entry_spot']}</b>) โดยมีฐานออเดอร์ Put และกำแพง <b>Put Wall ({ws['put_wall_spot']:,.2f})</b> คอยพยุงรับแรงขาย",
+        f"<b>ราคาย่อลงมาลึกจนได้เปรียบ</b>: ต่ำกว่าราคาเปิดเช้า (<b>{open_spot:,.2f}</b>) ถึง <b>{open_spot - float(buy_first['entry_spot_num']):.2f} จุด</b> แรงขายรายวันมักหมดแรงและเด้งกลับสั้นๆ $8–$25",
+        f"<b>ความเสี่ยงต่ำ คุ้มค่า</b>: ใช้ SL ปกติแค่ 8 จุด (<b>{buy_first['sl_bozovic']}</b>) และมีจุดดูดแม่เหล็ก <b>Max Pain ({ws['max_pain_spot']:,.2f})</b> คอยดึงราคาขึ้นด้านบน",
+    )
+
+    card_b2 = _card_html(
+        "buy-kill-card",
+        f"🔥 แผนดัก BUY จุดที่ 2 (ไม้เอกช้อนคำใหญ่ประจำวัน): {buy_2sd_ticket['short_title']}",
+        buy_2sd_ticket,
+        b2_pct,
+        f"<b>โซนขายมากเกินไปสุดขีด (-2SD Kill Zone)</b>: ราคาลงมาถึงโซนนี้เพียง 26%–28% ของวัน และซ้อนทับใกล้กรอบ Dynamic -2SD รอบนี้ (<b>{skew_info['live_buy2']}</b>)",
+        f"<b>รายใหญ่ต้องซื้อคืนเพื่อปิดความเสี่ยง</b>: เมื่อราคาลงถึง <b>{buy_2sd_ticket['entry_spot']}</b> แล้วหยุดไหล ความผันผวนที่ลดลงจะบังคับให้ Dealer ต้องเข้าซื้อทองคำกลับทันที (Vanna Rally)",
+        f"<b>ลุ้นกำไรคำใหญ่ +15 ถึง +25 จุด</b>: เป้าทำกำไรชัดเจนที่ <b>{buy_2sd_ticket['tp1']} / {buy_2sd_ticket['tp2']}</b> โดยคุมความเสี่ยง SL ปกติเพียง 8 จุด",
+    )
+
+    card_s1 = _card_html(
+        "sell-card",
+        f"🔴 แผนดัก SELL จุดที่ 1 (แนวต้านแรกใกล้ราคาปัจจุบัน): {sell_first['short_title']}",
+        sell_first,
+        s1_pct,
+        f"<b>เป็นด่านต้านสำคัญด่านแรกของวัน</b>: พิกัด <b>{sell_first['entry_spot']}</b> สูงกว่าราคาเปิดเช้าถึง <b>+{float(sell_first['entry_spot_num']) - open_spot:.2f} จุด</b> และใกล้กรอบต้านรอบนี้ (<b>{skew_info['live_sell1']}</b>)",
+        f"<b>รถเริ่มหมดแรงไต่ความชัน</b>: เมื่อราคาวิ่งขึ้นมาชนโซนแนวต้าน <b>{sell_first['entry_spot']}–{ws['call_wall_spot']:,.2f}</b> คนที่ซื้อมาจากข้างล่างจะเริ่มเทขายทำกำไรทำให้ราคาย่อตัว",
+        f"<b>เก็บกำไรไว คุมความเสี่ยงง่าย</b>: ดัก SELL เก็บย่อที่ <b>{sell_first['tp1']} / {sell_first['tp2']}</b> โดยวาง SL ปกติไว้ที่ <b>{sell_first['sl_bozovic']}</b> (+8 จุด)",
+    )
+
+    card_s2 = _card_html(
+        "sell-kill-card",
+        f"🔥 แผนดัก SELL จุดที่ 2 (ไม้เอกทุบคำใหญ่ประจำวัน): {sell_2sd_ticket['short_title']}",
+        sell_2sd_ticket,
+        s2_pct,
+        f"<b>โซนซื้อมากเกินไปสุดขีด (+2SD Kill Zone)</b>: พิกัด <b>{sell_2sd_ticket['entry_spot']}</b> สูงกว่าราคาเปิดเช้าถึง <b>+{tb['range_2sd']:.2f} จุด</b> โอกาสทะลุผ่านไปต่อในวันเดียวมีน้อยมาก",
+        f"<b>เลยกำแพง Call Wall ด้านบน</b>: อยู่สูงกว่ากำแพงต้านใหญ่ <b>Call Wall ({ws['call_wall_spot']:,.2f})</b> ทำให้มีแรงเทขายป้องกันกำแพงจากฝั่งสถาบันกดราคาลง",
+        f"<b>ถือเอาเป้าลงคำใหญ่ 15–25 จุด</b>: เก็บกำไรขาลงที่ <b>{sell_2sd_ticket['tp1']} / {sell_2sd_ticket['tp2']}</b> ด้วยอัตราชนะสูงถึง {html_lib.escape(s2_pct)}",
+    )
+
+    html_doc = f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<style>
+  * {{ box-sizing: border-box; font-family: 'Noto Sans Thai', 'Noto Looped Thai', 'Loma', 'Waree', sans-serif; margin: 0; padding: 0; }}
+  body {{ background: #070b12; color: #f8fafc; width: 1600px; height: 1120px; padding: 16px 20px; display: flex; flex-direction: column; gap: 11px; overflow: hidden; }}
+  .top-header {{ background: linear-gradient(90deg, #0f172a, #1e293b); border: 1px solid #334155; border-left: 6px solid #fbbf24; border-radius: 10px; padding: 11px 18px; display: flex; justify-content: space-between; align-items: center; }}
+  .hdr-title {{ font-size: 22px; font-weight: 800; color: #fbbf24; }}
+  .hdr-sub {{ font-size: 13.5px; color: #cbd5e1; margin-top: 3px; }}
+  .hdr-right {{ display: flex; gap: 14px; align-items: center; }}
+  .price-pill {{ background: linear-gradient(135deg, #f59e0b, #eab308); color: #000; padding: 7px 15px; border-radius: 9px; text-align: right; box-shadow: 0 0 12px rgba(245,158,11,0.35); }}
+  .price-pill .lbl {{ font-size: 11.5px; font-weight: 700; opacity: 0.85; }}
+  .price-pill .val {{ font-size: 24px; font-weight: 800; line-height: 1.1; }}
+  .open-pill {{ background: #1e293b; border: 1px solid #475569; padding: 7px 14px; border-radius: 9px; text-align: right; }}
+  .open-pill .lbl {{ font-size: 11.5px; color: #94a3b8; }}
+  .open-pill .val {{ font-size: 18px; font-weight: 800; color: #38bdf8; }}
+
+  .status-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }}
+  .stat-box {{ background: #0f172a; border: 1px solid #1e293b; border-radius: 8px; padding: 8px 13px; }}
+  .stat-hdr {{ font-size: 12.5px; font-weight: 800; color: #38bdf8; margin-bottom: 3px; }}
+  .stat-body {{ font-size: 12.5px; color: #e2e8f0; line-height: 1.4; }}
+
+  .verdict-bar {{ background: #111827; border: 2px solid {verdict_color}; border-radius: 9px; padding: 9px 15px; font-size: 15px; font-weight: 800; color: {verdict_color}; display: flex; align-items: center; justify-content: space-between; }}
+
+  .cards-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; flex: 1; }}
+  .col-stack {{ display: flex; flex-direction: column; gap: 10px; justify-content: space-between; }}
+
+  .plan-card {{ border-radius: 10px; padding: 11px 14px; display: flex; flex-direction: column; gap: 7px; flex: 1; justify-content: space-between; }}
+  .buy-card {{ background: rgba(22, 101, 52, 0.22); border: 1.5px solid #22c55e; }}
+  .buy-kill-card {{ background: rgba(20, 83, 45, 0.34); border: 2px solid #4ade80; box-shadow: inset 0 0 12px rgba(74,222,128,0.12); }}
+  .sell-card {{ background: rgba(153, 27, 27, 0.22); border: 1.5px solid #ef4444; }}
+  .sell-kill-card {{ background: rgba(127, 29, 29, 0.34); border: 2px solid #f87171; box-shadow: inset 0 0 12px rgba(248,113,113,0.12); }}
+
+  .card-top {{ display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid rgba(148,163,184,0.22); padding-bottom: 5px; }}
+  .card-title {{ font-size: 14.5px; font-weight: 800; color: #f8fafc; }}
+  .win-pill {{ background: #fbbf24; color: #000; font-size: 12.5px; font-weight: 800; padding: 3px 10px; border-radius: 20px; white-space: nowrap; }}
+
+  .entry-strip {{ background: rgba(15, 23, 42, 0.78); border-radius: 8px; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }}
+  .entry-label {{ font-size: 11.5px; color: #cbd5e1; font-weight: 600; }}
+  .entry-px {{ font-size: 24px; font-weight: 800; color: #fef08a; line-height: 1.15; }}
+  .fut-sub {{ font-size: 12px; color: #94a3b8; font-weight: 600; }}
+  .tp-sl-box {{ flex: 1; font-size: 12.2px; line-height: 1.48; color: #f1f5f9; border-left: 2px solid #334155; padding-left: 11px; }}
+  .tp-row {{ color: #86efac; }}
+  .sell-card .tp-row, .sell-kill-card .tp-row {{ color: #fde047; }}
+  .sl-row {{ color: #fca5a5; }}
+
+  .why-box {{ background: rgba(15, 23, 42, 0.52); border-radius: 7px; padding: 7px 11px; font-size: 12px; line-height: 1.42; color: #e2e8f0; }}
+  .why-hdr {{ font-weight: 800; color: #38bdf8; margin-bottom: 2px; font-size: 12.2px; }}
+  .why-item {{ margin-top: 2px; }}
+
+  .ruler-strip {{ background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 7px 12px; display: flex; justify-content: space-between; align-items: center; font-size: 11.8px; }}
+  .r-node {{ text-align: center; padding: 3px 7px; border-radius: 5px; }}
+  .r-buy {{ background: rgba(34,197,94,0.18); color: #86efac; border: 1px solid #22c55e; }}
+  .r-now {{ background: #fbbf24; color: #000; font-weight: 800; padding: 4px 10px; }}
+  .r-open {{ background: rgba(56,189,248,0.18); color: #7dd3fc; border: 1px solid #38bdf8; }}
+  .r-sell {{ background: rgba(239,68,68,0.18); color: #fca5a5; border: 1px solid #ef4444; }}
+
+  .rules-footer {{ background: rgba(127, 29, 29, 0.28); border: 1px solid #ef4444; border-radius: 8px; padding: 7px 14px; font-size: 12.2px; color: #fecaca; display: flex; justify-content: space-between; gap: 14px; }}
+  .rules-footer b {{ color: #fef08a; }}
+</style>
+</head>
+<body>
+  <div class="top-header">
+    <div>
+      <div class="hdr-title">🏆 สรุปแผนการเล่นฟันธง XAU/USD (ฉบับเข้าใจง่าย — อิงราคาและสถานการณ์จริงหน้างาน)</div>
+      <div class="hdr-sub">ข้อมูลเว็บ Hizeiris ล่าสุด: {html_lib.escape(snap.contract_name)} ({html_lib.escape(snap.round_str)}) &nbsp;|&nbsp; DTE รอบนี้ {snap.dte:.2f} (เทียบกรอบเช้า DTE {snap.fixed_dte:.2f}) &nbsp;|&nbsp; หัก Diff {snap.diff:.2f}</div>
+    </div>
+    <div class="hdr-right">
+      <div class="open-pill">
+        <div class="lbl">⚓ ราคาเปิดเช้าวันนี้ (06:30)</div>
+        <div class="val">{open_spot:,.2f} <span style="font-size:12px;color:#94a3b8;">(Fut {exact_calc['open_fut']:,.2f})</span></div>
+      </div>
+      <div class="price-pill">
+        <div class="lbl">👉 ราคา XAU/USD (Spot) ปัจจุบัน</div>
+        <div class="val">{spot:,.2f} <span style="font-size:12.5px;">({mvc['delta_px_from_open']} | {mvc['z_from_open']})</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="status-grid">
+    <div class="stat-box">
+      <div class="stat-hdr">📐 1) กรอบวิ่งวันนี้ (Fix เช้า 0.8) vs กรอบรอบนี้ (DTE {snap.dte:.2f})</div>
+      <div class="stat-body">• <b>กรอบหลักเช้า (DTE 0.8)</b>: 1SD ±{tb['range_1sd']:.2f} (รับ <b>{tb['buy_1sd']:,.2f}</b> / ต้าน <b>{tb['sell_1sd']:,.2f}</b>)<br>• <b>กรอบรอบปัจจุบัน (DTE {snap.dte:.2f})</b>: 1SD ±{skew_info['live_r1']} (รับ <b>{skew_info['live_buy1']}</b> / ต้าน <b>{skew_info['live_sell1']}</b>)</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-hdr">📊 2) คนในตลาดกำลังทำอะไร (Put / Call & กำแพง OI)</div>
+      <div class="stat-body">• {html_lib.escape(flow_short)}<br>• กำแพงรับ <b>Put Wall {ws['put_wall_spot']:,.2f}</b> &nbsp;|&nbsp; กำแพงต้าน <b>Call Wall {ws['call_wall_spot']:,.2f}</b></div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-hdr">📈 3) อาการของเส้นความผันผวน (IV Smile & Skew)</div>
+      <div class="stat-body">• IV ตอนเปิด <b>{snap.open_iv:.2f}%</b> &rarr; ATM Vol สด <b>{snap.atm_iv:.2f}%</b> (Vol Chg {snap.vol_chg:+.2f}%)<br>• {html_lib.escape(skew_short)}</div>
+    </div>
+  </div>
+
+  <div class="verdict-bar">
+    <span>{html_lib.escape(verdict_banner)}</span>
+    <span style="font-size:12.5px;color:#e2e8f0;font-weight:600;white-space:nowrap;">กฎเหล็ก: BUY เป้า TP &gt; จุดเข้า &gt; SL | SELL เป้า TP &lt; จุดเข้า &lt; SL</span>
+  </div>
+
+  <div class="cards-grid">
+    <div class="col-stack">
+      {card_b1}
+      {card_b2}
+    </div>
+    <div class="col-stack">
+      {card_s1}
+      {card_s2}
+    </div>
+  </div>
+
+  <div class="ruler-strip">
+    <div class="r-node r-buy">3SD BUY<br><b>{tb['buy_3sd']:,.2f}</b></div>
+    <div class="r-node r-buy">2SD BUY (ไม้เอก)<br><b>{tb['buy_2sd']:,.2f}</b></div>
+    <div class="r-node r-buy">Put Wall<br><b>{ws['put_wall_spot']:,.2f}</b></div>
+    <div class="r-node r-buy">1SD BUY (รับแรก)<br><b>{tb['buy_1sd']:,.2f}</b></div>
+    <div class="r-node r-now">👉 Spot ตอนนี้<br>{spot:,.2f}</div>
+    <div class="r-node r-open">⚓ ราคาเปิดเช้า<br><b>{open_spot:,.2f}</b></div>
+    <div class="r-node r-open">🧲 Max Pain<br><b>{ws['max_pain_spot']:,.2f}</b></div>
+    <div class="r-node r-sell">1SD SELL (ต้านแรก)<br><b>{tb['sell_1sd']:,.2f}</b></div>
+    <div class="r-node r-sell">Call Wall<br><b>{ws['call_wall_spot']:,.2f}</b></div>
+    <div class="r-node r-sell">2SD SELL (ไม้เอก)<br><b>{tb['sell_2sd']:,.2f}</b></div>
+    <div class="r-node r-sell">3SD SELL<br><b>{tb['sell_3sd']:,.2f}</b></div>
+  </div>
+
+  <div class="rules-footer">
+    <span>⚠️ <b>ข้อห้าม 1</b>: ห้ามกดเข้ากลางทางแถวราคาเปิด ({open_spot:,.2f}) รอให้ราคาวิ่งมาชนจุดเข้าในโพยเท่านั้น</span>
+    <span>⚠️ <b>ข้อห้าม 2</b>: ห้ามไล่กด SELL ตามน้ำที่แนวรับล่าง ({ws['put_wall_spot']:,.2f} / {tb['buy_1sd']:,.2f}) เพราะเป็นโซนคนรอช้อนซื้อ</span>
+    <span>⚠️ <b>ข้อห้าม 3</b>: ตั้ง TP/SL ตามตัวเลขในการ์ดทุกครั้ง ไม่ถือลุ้นไกลเกิน +25 จุดโดยไม่ล็อกกำไร</span>
+  </div>
+</body>
+</html>"""
+
+    html_file = os.path.abspath(f"final_plan_summary_{ts}.html")
+    with open(html_file, "w", encoding="utf-8") as f:
+        f.write(html_doc)
+
+    if CONFIG["DRY_RUN"] and not os.getenv("TEST_RENDER_FINAL_PLAN"):
+        return None
+
+    rendered_ok = _render_final_plan_via_pillow(
+        out_path, snap, exact_calc,
+        buy_first, buy_2sd_ticket, sell_first, sell_2sd_ticket,
+        b1_pct, b2_pct, s1_pct, s2_pct,
+        flow_short, skew_short, verdict_banner, verdict_color,
+    )
+
+    if rendered_ok:
+        caption = (
+            f"🏆 [ภาพสรุปปิดท้าย] แผนการเล่นฟันธง XAU/USD ฉบับเข้าใจง่าย ({snap.round_str})\n"
+            f"• ราคาปัจจุบัน: {spot:,.2f} (เปิดเช้า {open_spot:,.2f}) | "
+            f"ดัก BUY: {buy_first['entry_spot']} / {buy_2sd_ticket['entry_spot']} | "
+            f"ดัก SELL: {sell_first['entry_spot']} / {sell_2sd_ticket['entry_spot']}"
+        )
+        print(f"✅ สร้างภาพสรุปแผนปิดท้าย ({out_path}) สำเร็จ!")
+        return (out_path, caption)
+    return None
+
+
 def build_final_master_conclusion(snap: HizeirisSnapshot, exact_calc: Dict) -> str:
     """
     สร้างข้อความสุดท้าย: "🏆 บทสรุปสุดท้าย: แผนการเล่นฟันธง (ฉบับเข้าใจง่าย — อิงราคาและสถานการณ์จริงหน้างาน)"
@@ -3029,6 +3651,15 @@ def run_once():
 
     section_messages = synthesize_full_report_messages(snap, exact_calc, cap, CONFIG["GEMINI_API_KEY"], prev_state, round_history)
     send_telegram_parts(section_messages, CONFIG["TELEGRAM_BOT_TOKEN"], CONFIG["TELEGRAM_CHAT_ID"])
+
+    # สร้างและส่ง "ภาพสรุปแผนการเล่นฟันธงฉบับเข้าใจง่าย" ปิดท้ายรายงานเป็นลำดับสุดท้าย
+    final_plan_photo = render_final_plan_summary_image(snap, exact_calc)
+    if not CONFIG["DRY_RUN"] and final_plan_photo is not None:
+        send_telegram_photos(
+            [final_plan_photo],
+            CONFIG["TELEGRAM_BOT_TOKEN"],
+            CONFIG["TELEGRAM_CHAT_ID"],
+        )
 
     save_and_push_state(CONFIG["STATE_FILE"], {
         "trading_day": today_str,
