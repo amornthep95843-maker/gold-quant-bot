@@ -1,20 +1,12 @@
 {
   "trading_day": "2026-11-20",
-<<<<<<< Updated upstream
-  "updated_th": "2026-11-20 03:34",
-=======
-  "updated_th": "2026-11-20 03:36",
->>>>>>> Stashed changes
+  "updated_th": "2026-11-20 04:05",
   "contract": "OG3X6",
-  "round_str": "รอบ 75/75 เวลา 03:30 (เข้า 03:32)",
-  "dte": 0.92,
+  "round_str": "รอบ 77/77 เวลา 04:00 (เข้า 04:02)",
+  "dte": 0.89,
   "dte_lock": false,
   "open_spot": 3730.2,
-<<<<<<< Updated upstream
-  "spot_now": 3669.28,
-=======
-  "spot_now": 3669.09,
->>>>>>> Stashed changes
+  "spot_now": 3659.1,
   "put_wall": 3697.5,
   "call_wall": 3847.5,
   "max_pain": 3822.5,
@@ -50,7 +42,7 @@
       "sl_normal": 3793.05,
       "sl_rec1": 3797.55,
       "rec1_tp": 3810.05,
-      "status": "PASSED"
+      "status": "FRESH"
     },
     {
       "id": "SELL_2SD",
@@ -61,7 +53,7 @@
       "sl_normal": 3847.91,
       "sl_rec1": 3852.41,
       "rec1_tp": 3864.91,
-      "status": "PASSED"
+      "status": "FRESH"
     },
     {
       "id": "CALL_WALL",
@@ -72,7 +64,7 @@
       "sl_normal": 3855.5,
       "sl_rec1": 3860.0,
       "rec1_tp": 3872.5,
-      "status": "PASSED"
+      "status": "FRESH"
     }
   ]
 }
