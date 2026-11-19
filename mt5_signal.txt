@@ -1,11 +1,19 @@
 TRADING_DAY=2026-11-20
+<<<<<<< Updated upstream
 UPDATED_TH=2026-11-20 06:29
+=======
+UPDATED_TH=2026-11-20 06:35
+>>>>>>> Stashed changes
 CONTRACT=OG3X6
 ROUND_STR=รอบ 80/80 เวลา 04:45 (เข้า 04:47)
 DTE=0.86
 DTE_LOCK=0
 OPEN_SPOT=3855.20
+<<<<<<< Updated upstream
 SPOT_NOW=3625.59
+=======
+SPOT_NOW=3623.41
+>>>>>>> Stashed changes
 PUT_WALL=3747.50
 CALL_WALL=3687.50
 MAX_PAIN=3777.50
