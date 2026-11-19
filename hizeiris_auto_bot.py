@@ -2329,7 +2329,7 @@ def parse_snapshot_from_dom_text(
 
     fut_px = _parse_float(r"Futures\s*([2-5][0-9]{3}(?:\.[0-9]+)?)", live_scope, 0.0)
     if fut_px == 0.0:
-        fut_px = _parse_float(r"ราคากลาง\s*([2-5],?[0-9]{3}(?:\.[0-9]+)?)", raw_text, 3856.8)
+        fut_px = _parse_float(r"ราคากลาง\s*([2-5],?[0-9]{3}(?:\.[0-9]+)?)", live_scope, 0.0) or _parse_float(r"Futures\s*([2-5][0-9]{3}(?:\.[0-9]+)?)", raw_text, 0.0)
 
     latest_gc_val = _parse_float(r"ล่าสุด\s*([2-5],?[0-9]{3}(?:\.[0-9]+)?)", diff_scope, 0.0)
     latest_gc_fut = latest_gc_val if _is_valid_gold_price(latest_gc_val, fut_px) else None
@@ -2454,13 +2454,13 @@ def parse_snapshot_from_dom_text(
             "+3SD": float(sd3_m.group(4).replace(",", "")),
         }
 
-    atm_live = _parse_float(r"ATM\s*vol\s*([0-9]+\.?[0-9]*)", raw_text, 0.0)
+    atm_live = _parse_float(r"ATM\s*vol\s*([0-9]+\.?[0-9]*)", live_scope, 0.0) or _parse_float(r"ATM\s*vol\s*([0-9]+\.?[0-9]*)", raw_text, 0.0)
     if atm_live == 0.0:
         atm_live = open_iv if open_iv > 0 else _parse_float(r"\bIV%?\s*([0-9]+\.[0-9]+)", diff_scope, 27.09)
     if open_iv == 0.0:
         open_iv = atm_live
 
-    vol_chg = _parse_float(r"Vol\s*Chg\s*([+\-]?[0-9]+\.?[0-9]*)", raw_text, 0.0)
+    vol_chg = _parse_float(r"Vol\s*Chg\s*([+\-]?[0-9]+\.?[0-9]*)", live_scope, 0.0) or _parse_float(r"Vol\s*Chg\s*([+\-]?[0-9]+\.?[0-9]*)", raw_text, 0.0)
     vol_settle_atm = round(atm_live - vol_chg, 2)
 
     intra_m = re.search(r"Intraday\s+C\s*([0-9,]+)\s*[·•]?\s*P\s*([0-9,]+)\s*[·•]?\s*P/C\s*([0-9.]+)", live_scope, re.IGNORECASE)
@@ -2469,8 +2469,9 @@ def parse_snapshot_from_dom_text(
         intraday_p = int(intra_m.group(2).replace(",", ""))
         intraday_pc = float(intra_m.group(3))
     else:
-        intraday_c, intraday_p = 2832, 1697
-        intraday_pc = _parse_float(r"Intraday.*?P/C\s*([0-9]+\.?[0-9]*)", raw_text, 0.60)
+        intraday_c = int(prev_state.get("intraday_c", 0)) if (prev_state and prev_state.get("trading_day") == today_str) else 0
+        intraday_p = int(prev_state.get("intraday_p", 0)) if (prev_state and prev_state.get("trading_day") == today_str) else 0
+        intraday_pc = _parse_float(r"Intraday.*?P/C\s*([0-9]+\.?[0-9]*)", live_scope, round(intraday_p / max(intraday_c, 1), 2))
 
     oi_m = re.search(r"Open Interest\s+C\s*([0-9,]+)\s*[·•]?\s*P\s*([0-9,]+)\s*[·•]?\s*P/C\s*([0-9.]+)", live_scope, re.IGNORECASE)
     if oi_m:
@@ -2478,16 +2479,17 @@ def parse_snapshot_from_dom_text(
         oi_p = int(oi_m.group(2).replace(",", ""))
         oi_pc = float(oi_m.group(3))
     else:
-        oi_c, oi_p = 1014, 884
-        oi_pc = _parse_float(r"Open Interest.*?P/C\s*([0-9]+\.?[0-9]*)", raw_text, 0.87)
+        oi_c = int(prev_state.get("oi_c", 0)) if (prev_state and prev_state.get("trading_day") == today_str) else 0
+        oi_p = int(prev_state.get("oi_p", 0)) if (prev_state and prev_state.get("trading_day") == today_str) else 0
+        oi_pc = _parse_float(r"Open Interest.*?P/C\s*([0-9]+\.?[0-9]*)", live_scope, round(oi_p / max(oi_c, 1), 2))
 
     churn_m = re.search(r"Churn\s*C\s*([0-9.]+)\s*[·•/]?\s*P\s*([0-9.]+)", live_scope, re.IGNORECASE)
     if churn_m:
         churn_c, churn_p = float(churn_m.group(1)), float(churn_m.group(2))
         churn_str = f"C {churn_c:.2f} / P {churn_p:.2f}"
     else:
-        churn_c, churn_p = 0.54, 0.23
-        churn_str = "C 0.54 / P 0.23"
+        churn_c, churn_p = 0.0, 0.0
+        churn_str = "C 0.00 / P 0.00"
 
     max_pain = float(svg_m.get("max_pain_chart") or 0) or _parse_float(r"Max\s*Pain\s*([2-5][0-9]{3})", live_scope, round(fut_px, -1))
 
