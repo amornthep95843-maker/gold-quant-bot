@@ -210,7 +210,8 @@ def _is_valid_gold_price(val: float, ref_fut: float = 0.0) -> bool:
     return True
 
 
-def fetch_realtime_xauusd_spot(ref_spot: float) -> Optional[float]:
+def fetch_realtime_xauusd_ohlc(ref_spot: float) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """ดึงราคา Spot สด + จุดสูงสุด/ต่ำสุดของวัน (Day High / Day Low) จาก TradingView เพื่อตรวจ First Touch / Passed แม่นยำแม้ราคาสวิงกลางรอบ"""
     headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
     for endpoint in [
         "https://scanner.tradingview.com/forex/scan",
@@ -219,7 +220,7 @@ def fetch_realtime_xauusd_spot(ref_spot: float) -> Optional[float]:
         try:
             payload = {
                 "symbols": {"tickers": ["OANDA:XAUUSD", "FOREXCOM:XAUUSD", "FX_IDC:XAUUSD"]},
-                "columns": ["close"],
+                "columns": ["close", "high", "low"],
             }
             resp = requests.post(endpoint, json=payload, headers=headers, timeout=6)
             if resp.status_code == 200:
@@ -228,9 +229,13 @@ def fetch_realtime_xauusd_spot(ref_spot: float) -> Optional[float]:
                     d = r.get("d", [])
                     if d and d[0] is not None:
                         px = round(float(d[0]), 2)
+                        hi = round(float(d[1]), 2) if (len(d) > 1 and d[1] is not None) else None
+                        lo = round(float(d[2]), 2) if (len(d) > 2 and d[2] is not None) else None
                         if _is_valid_gold_price(px, ref_spot):
-                            print(f"📡 ดึงราคา Spot XAU/USD สดจาก TradingView ({r.get('s')}): {px:,.2f}")
-                            return px
+                            hi = hi if (hi is not None and _is_valid_gold_price(hi, ref_spot)) else px
+                            lo = lo if (lo is not None and _is_valid_gold_price(lo, ref_spot)) else px
+                            print(f"📡 ดึงราคา Spot XAU/USD สดจาก TradingView ({r.get('s')}): {px:,.2f} (Day High {hi:,.2f} / Low {lo:,.2f})")
+                            return px, hi, lo
         except Exception:
             pass
 
@@ -247,11 +252,16 @@ def fetch_realtime_xauusd_spot(ref_spot: float) -> Optional[float]:
                     mid = round((bid + ask) / 2.0, 2) if (bid > 0 and ask > 0) else 0.0
                     if _is_valid_gold_price(mid, ref_spot):
                         print(f"📡 ดึงราคา Spot XAU/USD สดจาก Swissquote สำเร็จ: {mid:,.2f}")
-                        return mid
+                        return mid, mid, mid
     except Exception:
         pass
 
-    return None
+    return None, None, None
+
+
+def fetch_realtime_xauusd_spot(ref_spot: float) -> Optional[float]:
+    px, _, _ = fetch_realtime_xauusd_ohlc(ref_spot)
+    return px
 
 
 def check_round_number_bonus(spot_price: float) -> str:
@@ -2750,6 +2760,7 @@ def _render_final_plan_via_pillow(
     skew_short: str,
     verdict_banner: str,
     verdict_color: str,
+    first_touch_map: Optional[Dict] = None,
 ) -> bool:
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -2883,17 +2894,51 @@ def _render_final_plan_via_pillow(
         draw.rounded_rectangle([20, 206, 1580, 250], radius=8, fill=(17, 24, 39), outline=v_rgb, width=2)
         _draw_txt(draw, (32, 218), verdict_banner, sz=12, bold=True, fill=v_rgb)
 
+        ft_map = first_touch_map or {}
+
+        def _ticket_ft_state(t_obj: Dict) -> Tuple[str, str]:
+            st_title = str(t_obj.get("short_title", ""))
+            sd = str(t_obj.get("side", ""))
+            k = ""
+            if "1SD" in st_title:
+                k = "BUY_1SD" if sd == "BUY" else "SELL_1SD"
+            elif "2SD" in st_title:
+                k = "BUY_2SD" if sd == "BUY" else "SELL_2SD"
+            elif "3SD" in st_title:
+                k = "BUY_3SD" if sd == "BUY" else "SELL_3SD"
+            elif "Put Wall" in st_title:
+                k = "PUT_WALL"
+            elif "Call Wall" in st_title:
+                k = "CALL_WALL"
+            info = ft_map.get(k, {})
+            if isinstance(info, dict) and info.get("status") in ("TOUCHED", "PASSED"):
+                return str(info.get("status")), str(info.get("short_badge", "แตะแล้ว"))
+            return "FRESH", "สดใหม่ First Touch"
+
         # 4. 4 Trade Cards (2x2 Grid)
         def _draw_trade_card(x0, y0, x1, y1, is_buy, is_kill, title, t, win_pct, reasons):
-            bg = (14, 42, 28) if (is_buy and not is_kill) else ((18, 55, 35) if is_buy else ((48, 18, 22) if not is_kill else (62, 20, 26)))
-            bdr = (34, 197, 94) if is_buy else (239, 68, 68)
+            ft_st, ft_short = _ticket_ft_state(t)
+            if ft_st == "PASSED":
+                bg = (30, 32, 40)
+                bdr = (100, 116, 139)
+            elif ft_st == "TOUCHED":
+                bg = (38, 36, 26)
+                bdr = (217, 119, 6)
+            else:
+                bg = (14, 42, 28) if (is_buy and not is_kill) else ((18, 55, 35) if is_buy else ((48, 18, 22) if not is_kill else (62, 20, 26)))
+                bdr = (34, 197, 94) if is_buy else (239, 68, 68)
             draw.rounded_rectangle([x0, y0, x1, y1], radius=10, fill=bg, outline=bdr, width=2)
 
-            # Card Header
-            _draw_txt(draw, (x0 + 16, y0 + 12), title, sz=15, bold=True, fill=(248, 250, 252))
-            pill_w = 225
-            draw.rounded_rectangle([x1 - pill_w - 14, y0 + 10, x1 - 14, y0 + 38], radius=14, fill=(251, 191, 36))
-            _draw_txt(draw, (x1 - pill_w + 2, y0 + 15), f"โอกาสชนะ {win_pct.replace('–', '-')}", sz=13, bold=True, fill=(0, 0, 0))
+            # Card Header + First Touch Badge + Win Rate Pill
+            _draw_txt(draw, (x0 + 14, y0 + 13), title[:38], sz=14, bold=True, fill=(248, 250, 252))
+            pill_w = 192
+            draw.rounded_rectangle([x1 - pill_w - 12, y0 + 10, x1 - 12, y0 + 36], radius=13, fill=(251, 191, 36))
+            _draw_txt(draw, (x1 - pill_w, y0 + 15), f"ชนะ {win_pct.replace('–', '-')}", sz=12, bold=True, fill=(0, 0, 0))
+
+            ft_w = 148
+            ft_bg = (22, 163, 74) if ft_st == "FRESH" else ((217, 119, 6) if ft_st == "TOUCHED" else (220, 38, 38))
+            draw.rounded_rectangle([x1 - pill_w - ft_w - 20, y0 + 10, x1 - pill_w - 20, y0 + 36], radius=13, fill=ft_bg)
+            _draw_txt(draw, (x1 - pill_w - ft_w - 10, y0 + 15), ft_short, sz=11, bold=True, fill=(255, 255, 255))
 
             # Entry & TP/SL Box
             draw.rounded_rectangle([x0 + 14, y0 + 46, x1 - 14, y0 + 138], radius=8, fill=(11, 17, 30), outline=(51, 65, 85), width=1)
@@ -2985,18 +3030,22 @@ def _render_final_plan_via_pillow(
 
         # 5. Visual Price Ruler Bar
         draw.rounded_rectangle([20, 956, 1580, 1036], radius=8, fill=(15, 23, 42), outline=(51, 65, 85), width=1)
+        def _rtag(k: str) -> str:
+            info = ft_map.get(k, {})
+            return f" {info.get('ruler_tag', '')}" if isinstance(info, dict) and info.get("ruler_tag") else ""
+
         nodes = [
-            ("3SD BUY", f"{tb['buy_3sd']:,.2f}", "buy"),
-            ("2SD BUY (ไม้เอก)", f"{tb['buy_2sd']:,.2f}", "buy"),
-            ("Put Wall", f"{ws['put_wall_spot']:,.2f}", "buy"),
-            ("1SD BUY (รับแรก)", f"{tb['buy_1sd']:,.2f}", "buy"),
+            (f"3SD BUY{_rtag('BUY_3SD')}", f"{tb['buy_3sd']:,.2f}", "buy"),
+            (f"2SD BUY{_rtag('BUY_2SD')}", f"{tb['buy_2sd']:,.2f}", "buy"),
+            (f"Put Wall{_rtag('PUT_WALL')}", f"{ws['put_wall_spot']:,.2f}", "buy"),
+            (f"1SD BUY{_rtag('BUY_1SD')}", f"{tb['buy_1sd']:,.2f}", "buy"),
             ("Spot ตอนนี้", f"{spot:,.2f}", "now"),
             ("ราคาเปิดเช้า", f"{open_spot:,.2f}", "open"),
             ("Max Pain", f"{ws['max_pain_spot']:,.2f}", "open"),
-            ("1SD SELL (ต้านแรก)", f"{tb['sell_1sd']:,.2f}", "sell"),
-            ("Call Wall", f"{ws['call_wall_spot']:,.2f}", "sell"),
-            ("2SD SELL (ไม้เอก)", f"{tb['sell_2sd']:,.2f}", "sell"),
-            ("3SD SELL", f"{tb['sell_3sd']:,.2f}", "sell"),
+            (f"1SD SELL{_rtag('SELL_1SD')}", f"{tb['sell_1sd']:,.2f}", "sell"),
+            (f"Call Wall{_rtag('CALL_WALL')}", f"{ws['call_wall_spot']:,.2f}", "sell"),
+            (f"2SD SELL{_rtag('SELL_2SD')}", f"{tb['sell_2sd']:,.2f}", "sell"),
+            (f"3SD SELL{_rtag('SELL_3SD')}", f"{tb['sell_3sd']:,.2f}", "sell"),
         ]
         nw = 136
         for idx, (nlbl, npx, nkind) in enumerate(nodes):
@@ -3036,6 +3085,7 @@ def _render_final_plan_via_pillow(
 def render_final_plan_summary_image(
     snap: HizeirisSnapshot,
     exact_calc: Dict,
+    first_touch_map: Optional[Dict] = None,
 ) -> Optional[Tuple[str, str]]:
     """
     สร้างภาพอินโฟกราฟิกสรุปปิดท้ายรายงาน:
@@ -3095,7 +3145,10 @@ def render_final_plan_summary_image(
     dist_b1 = round(abs(spot - float(buy_first["entry_spot_num"])), 2)
     dist_s1 = round(abs(float(sell_first["entry_spot_num"]) - spot), 2)
 
-    if dist_b1 <= 6.0:
+    if snap.dte < 0.04:
+        verdict_banner = "ป้ายแดง DTE < 0.04 (30-60 นาทีสุดท้ายก่อนปิดตลาด): งดดักสวน Mean Reversion ทุกด่าน! (วิจัย Adams et al., 2025)"
+        verdict_color = "#ef4444"
+    elif dist_b1 <= 6.0:
         verdict_banner = f"🟢 คำสั่งหน้างานตอนนี้: ราคา ({spot:,.2f}) ลงมาใกล้จุดรับแรก ({buy_first['entry_spot']}) แล้ว! รอแท่งเทียนหยุดไหลแล้วกด BUY ตามการ์ดซ้ายบนทันที"
         verdict_color = "#22c55e"
     elif dist_s1 <= 6.0:
@@ -3339,7 +3392,7 @@ def render_final_plan_summary_image(
         out_path, snap, exact_calc,
         buy_first, buy_2sd_ticket, sell_first, sell_2sd_ticket,
         b1_pct, b2_pct, s1_pct, s2_pct,
-        flow_short, skew_short, verdict_banner, verdict_color,
+        flow_short, skew_short, verdict_banner, verdict_color, first_touch_map,
     )
 
     if rendered_ok:
@@ -3526,15 +3579,24 @@ def _evaluate_first_touch_status(
     ws: Dict[str, float],
     prev_state: Optional[Dict],
     today_str: str,
+    day_high: Optional[float] = None,
+    day_low: Optional[float] = None,
 ) -> Dict[str, Dict[str, object]]:
     """
-    กฎเหล็กงานวิจัย First Touch Only (เข้าเฉพาะครั้งแรกที่ราคาวิ่งไปชนเสาหรือโซนเท่านั้น!):
-    - ติดตามจาก session_state.json ตลอดทั้งวันว่าโซนใด (1SD/2SD/3SD BUY/SELL, Put Wall, Call Wall)
-      ยังไม่เคยถูกแตะ (FRESH / เข้าได้) หรือถูกแตะไปแล้วในวันนี้ (USED / ห้ามเข้าซ้ำรอบ 2!)
+    ระบบตรวจสถานะโซนงานวิจัย 3 ระดับ (First Touch / Passed-Broken Tracker) + อิง Day High / Day Low จริงของวัน:
+    - FRESH  : 🆕 สดใหม่ (First Touch — เข้าได้ตามเงื่อนไขวิจัย)
+    - TOUCHED: 🟡 แตะแล้วเด้ง (ใช้สิทธิ์ First Touch ไปแล้ว — งดเข้าซ้ำรอบ 2!)
+    - PASSED : 🔴 วิ่งทะลุผ่านไปแล้ว (เลยโซน > 6 จุด — ปิดโซนถาวร ข้ามไปรอด่านสดใหม่ถัดไป!)
     """
     touched_map: Dict[str, Dict[str, str]] = {}
+    prev_hi, prev_lo = spot, spot
     if prev_state and prev_state.get("trading_day") == today_str:
         touched_map = dict(prev_state.get("touched_zones", {}))
+        prev_hi = float(prev_state.get("session_high", spot))
+        prev_lo = float(prev_state.get("session_low", spot))
+
+    eff_high = round(max([v for v in [spot, prev_hi, day_high] if v is not None and v > 0]), 2)
+    eff_low = round(min([v for v in [spot, prev_lo, day_low] if v is not None and v > 0]), 2)
 
     zones_def = [
         ("BUY_1SD", "1SD BUY เช้า", float(tb_morning["buy_1sd"]), "BUY"),
@@ -3551,31 +3613,61 @@ def _evaluate_first_touch_status(
     status_out: Dict[str, Dict[str, object]] = {}
 
     for zkey, zlabel, zpx, zside in zones_def:
-        hit_now = (spot <= zpx + 2.5) if zside == "BUY" else (spot >= zpx - 2.5)
-        if zkey not in touched_map and hit_now:
-            touched_map[zkey] = {"time": now_hm, "price": f"{spot:,.2f}", "zone_px": f"{zpx:,.2f}"}
+        # ตรวจว่าวิ่งทะลุผ่านไปแล้ว (> 6.0 จุด) หรือแตะโซนแล้ว (<= 2.5 จุด) จากทั้งราคาปัจจุบันและ High/Low ของวัน
+        if zside == "BUY":
+            passed_now = (eff_low <= zpx - 6.0)
+            touched_now = (eff_low <= zpx + 2.5)
+            extreme_px = eff_low
+        else:
+            passed_now = (eff_high >= zpx + 6.0)
+            touched_now = (eff_high >= zpx - 2.5)
+            extreme_px = eff_high
 
-        is_touched = zkey in touched_map
+        existing = touched_map.get(zkey)
+        prev_st = existing.get("status", "TOUCHED") if isinstance(existing, dict) else "FRESH"
+
+        if passed_now or prev_st == "PASSED":
+            cur_status = "PASSED"
+            t_time = existing.get("time", now_hm) if isinstance(existing, dict) else now_hm
+            touched_map[zkey] = {"status": "PASSED", "time": t_time, "price": f"{extreme_px:,.2f}", "zone_px": f"{zpx:,.2f}"}
+        elif touched_now or prev_st == "TOUCHED":
+            cur_status = "TOUCHED"
+            t_time = existing.get("time", now_hm) if isinstance(existing, dict) else now_hm
+            touched_map[zkey] = {"status": "TOUCHED", "time": t_time, "price": f"{extreme_px:,.2f}", "zone_px": f"{zpx:,.2f}"}
+        else:
+            cur_status = "FRESH"
+
         touch_info = touched_map.get(zkey)
-        if is_touched:
-            badge = f"⚠️ แตะไปแล้ว ({touch_info['time']} น.) — ห้ามเข้าซ้ำรอบ 2!"
-            short_badge = f"แตะแล้ว {touch_info['time']} (งดซ้ำ)"
+        if cur_status == "PASSED":
+            badge = f"🔴 วิ่งทะลุผ่านไปแล้ว ({touch_info['time']} น., ลึกสุด {touch_info['price']}) — ปิดโซนถาวร ข้ามไปด่านถัดไป!"
+            short_badge = "ทะลุแล้ว (ข้ามด่าน)"
+            ruler_tag = "(ทะลุ)"
+        elif cur_status == "TOUCHED":
+            badge = f"🟡 แตะไปแล้ว ({touch_info['time']} น.) — ใช้สิทธิ์ First Touch แล้ว งดเข้าซ้ำ!"
+            short_badge = "แตะแล้ว (งดซ้ำ)"
+            ruler_tag = "(แตะ)"
         else:
             badge = "🆕 สดใหม่ (First Touch — เข้าได้ตามเงื่อนไขวิจัย)"
             short_badge = "สดใหม่ (First Touch)"
+            ruler_tag = ""
 
         status_out[zkey] = {
             "key": zkey,
             "label": zlabel,
             "price": zpx,
             "side": zside,
-            "is_touched": is_touched,
+            "status": cur_status,
+            "is_touched": cur_status in ("TOUCHED", "PASSED"),
+            "is_passed": cur_status == "PASSED",
             "touch_info": touch_info,
             "badge": badge,
             "short_badge": short_badge,
+            "ruler_tag": ruler_tag,
         }
 
     status_out["_raw_touched_map"] = touched_map
+    status_out["_session_high"] = eff_high
+    status_out["_session_low"] = eff_low
     return status_out
 
 
@@ -3602,7 +3694,7 @@ def build_clean_section_messages(
     open_spot = exact_calc["open_spot"]
     ft = first_touch_map or {}
 
-    def _get_ft_badge(ticket: Dict[str, object]) -> Tuple[bool, str]:
+    def _get_ft_badge(ticket: Dict[str, object]) -> Tuple[str, str]:
         st = str(ticket.get("short_title", ""))
         side = str(ticket.get("side", ""))
         k = ""
@@ -3617,14 +3709,14 @@ def build_clean_section_messages(
         elif "Call Wall" in st:
             k = "CALL_WALL"
         info = ft.get(k, {})
-        if isinstance(info, dict) and info.get("is_touched"):
-            return True, str(info.get("badge", "⚠️ แตะไปแล้ว — งดเข้าซ้ำ"))
-        return False, "🆕 สดใหม่ (First Touch — เข้าได้)"
+        if isinstance(info, dict) and info.get("status") in ("TOUCHED", "PASSED"):
+            return str(info.get("status")), str(info.get("badge", "⚠️ แตะไปแล้ว — งดเข้าซ้ำ"))
+        return "FRESH", "🆕 สดใหม่ (First Touch — เข้าได้)"
 
     def _compact_ticket(idx: int, t: Dict[str, object]) -> str:
         dist = round(abs(spot - float(t["entry_spot_num"])), 2)
-        is_used, ft_txt = _get_ft_badge(t)
-        prefix = "⛔ [งดเข้าซ้ำ]" if is_used else ("🟢" if t["side"] == "BUY" else "🔴")
+        ft_status, ft_txt = _get_ft_badge(t)
+        prefix = "🔴 [ทะลุแล้ว-ข้าม]" if ft_status == "PASSED" else ("🟡 [แตะแล้ว-งดซ้ำ]" if ft_status == "TOUCHED" else ("🟢" if t["side"] == "BUY" else "🔴"))
         return (
             f"{prefix} *{idx}) {t['short_title']}* (ห่าง `{dist:.2f}` จุด)\n"
             f"   • สถานะวิจัย: {ft_txt}\n"
@@ -3632,21 +3724,45 @@ def build_clean_section_messages(
             f"   • 🔄 แก้พอร์ต 2x: คัต `{t['sl1']}` สลับเปิด -> เป้า `{t['rec1_2x_tp']}`"
         )
 
-    fresh_buys = [t for t in tactical["buy_tickets"] if not _get_ft_badge(t)[0]]
-    fresh_sells = [t for t in tactical["sell_tickets"] if not _get_ft_badge(t)[0]]
+    fresh_buys = [t for t in tactical["buy_tickets"] if _get_ft_badge(t)[0] == "FRESH"]
+    fresh_sells = [t for t in tactical["sell_tickets"] if _get_ft_badge(t)[0] == "FRESH"]
     best_buy = fresh_buys[0] if fresh_buys else tactical["buy_tickets"][0]
     best_sell = fresh_sells[0] if fresh_sells else tactical["sell_tickets"][0]
 
     buy_cards = "\n\n".join(_compact_ticket(i, t) for i, t in enumerate(tactical["buy_tickets"][:2], 1))
     sell_cards = "\n\n".join(_compact_ticket(i, t) for i, t in enumerate(tactical["sell_tickets"][:2], 1))
 
+    d_mp = abs(ws["max_pain_spot"] - spot)
+    d_pw = abs(spot - ws["put_wall_spot"])
+    d_cw = abs(ws["call_wall_spot"] - spot)
+    magnet_notes = []
+    if d_mp <= 30.0:
+        magnet_notes.append(f"🧲 Max Pain `{ws['max_pain_spot']:,.2f}` อยู่ในระยะดูดแม่เหล็ก `<$30` (ห่าง `{d_mp:.1f}` จุด, Corr `+0.85`)")
+    if d_pw <= 30.0:
+        magnet_notes.append(f"🧲 Put Wall `{ws['put_wall_spot']:,.2f}` อยู่ในระยะ `<$30` (ห่าง `{d_pw:.1f}` จุด)")
+    if d_cw <= 30.0:
+        magnet_notes.append(f"🧲 Call Wall `{ws['call_wall_spot']:,.2f}` อยู่ในระยะ `<$30` (ห่าง `{d_cw:.1f}` จุด)")
+    if not magnet_notes:
+        magnet_notes.append(f"📏 เป้ากำแพง/Max Pain ห่างเกิน `$30` (Max Pain ห่าง `{d_mp:.1f}` จุด) -> ใช้กฎ Fixed TP `@ +$25` (ไม่ถือลุ้นไกลเกิน `$50`)")
+    magnet_line = " | ".join(magnet_notes)
+
+    dte_lock_banner = (
+        "🚨 *[ป้ายแดง DTE < 0.04 — 30–60 นาทีสุดท้ายก่อนปิดตลาด]: งดดักสวน Mean Reversion ทุกด่าน!* (วิจัย Adams et al., 2025: ตลาดไหลทางเดียว)\n"
+        if snap.dte < 0.04
+        else ""
+    )
+    sess_hi = float(ft.get("_session_high", spot))
+    sess_lo = float(ft.get("_session_low", spot))
+
     msg_1 = (
         f"⚡ *สรุปหน้างาน & โพยจุดเข้า ({snap.contract_name} | {snap.round_str})*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🥇 *Spot ปัจจุบัน*: *`{spot:,.2f}`* _(เปิดเช้า `{open_spot:,.2f}`, เปลี่ยน `{mvc['delta_px_from_open']}` จุด = `{mvc['z_from_open']}`)_\n"
+        f"{dte_lock_banner}"
+        f"🥇 *Spot ปัจจุบัน*: *`{spot:,.2f}`* _(เปิดเช้า `{open_spot:,.2f}` | สูง/ต่ำวันนี้ `{sess_hi:,.2f} / {sess_lo:,.2f}` | `{mvc['z_from_open']}`)_\n"
         f"📐 *กรอบเช้า (DTE 0.8)*: `1SD ±{tb['range_1sd']:.2f}` (`{tb['buy_1sd']:,.2f} / {tb['sell_1sd']:,.2f}`) | `2SD ±{tb['range_2sd']:.2f}` (`{tb['buy_2sd']:,.2f} / {tb['sell_2sd']:,.2f}`)\n"
-        f"🧱 *กำแพง OI ปัจจุบัน*: Put Wall `{ws['put_wall_spot']:,.2f}` | Max Pain `{ws['max_pain_spot']:,.2f}` | Call Wall `{ws['call_wall_spot']:,.2f}`\n"
-        f"🔑 *กฎเหล็กวิจัย (First Touch Only)*: *เข้าออเดอร์เฉพาะ \"ครั้งแรก\" ที่ราคาวิ่งมาชนเสาหรือโซนเท่านั้น!* หากโซนไหนแตะไปแล้วให้ข้ามไปรอโซนสดใหม่ถัดไป\n\n"
+        f"🧱 *กำแพง OI*: Put Wall `{ws['put_wall_spot']:,.2f}` | Max Pain `{ws['max_pain_spot']:,.2f}` | Call Wall `{ws['call_wall_spot']:,.2f}`\n"
+        f"{magnet_line}\n"
+        f"🔑 *กฎ First Touch Only*: เข้าเฉพาะครั้งแรก! (`🆕 สดใหม่` = เข้าได้ | `🟡 แตะแล้ว` = งดซ้ำ | `🔴 ทะลุแล้ว` = ปิดโซนถาวร)\n\n"
         f"🟢 *[ฝั่งดัก BUY — แนวรับด้านล่าง]*\n"
         f"{buy_cards}\n\n"
         f"🔴 *[ฝั่งดัก SELL — แนวต้านด้านบน]*\n"
@@ -3657,7 +3773,8 @@ def build_clean_section_messages(
     for zkey in ["BUY_1SD", "BUY_2SD", "PUT_WALL", "SELL_1SD", "SELL_2SD", "CALL_WALL"]:
         info = ft.get(zkey)
         if isinstance(info, dict) and info.get("is_touched"):
-            touched_summary_list.append(f"{info['label']} ({info['touch_info']['time']} น.)")
+            st_lbl = "🔴ทะลุแล้ว" if info.get("is_passed") else "🟡แตะแล้ว"
+            touched_summary_list.append(f"{st_lbl} {info['label']} ({info['touch_info']['time']} น.)")
     touched_str = ", ".join(touched_summary_list) if touched_summary_list else "ยังไม่มีโซนใดถูกแตะ (ทุกด่านสดใหม่ First Touch 100%)"
 
     msg_2 = (
@@ -3686,7 +3803,9 @@ def build_clean_section_messages(
 
     dist_b = round(abs(spot - float(best_buy["entry_spot_num"])), 2)
     dist_s = round(abs(float(best_sell["entry_spot_num"]) - spot), 2)
-    if dist_b <= 6.0:
+    if snap.dte < 0.04:
+        action_now = "🚨 *งดดักสวน Mean Reversion ทุกด่าน!* (อยู่ในช่วง 30–60 นาทีสุดท้าย DTE < 0.04 ตามวิจัย Adams et al., 2025)"
+    elif dist_b <= 6.0:
         action_now = f"🟢 *เตรียมเข้า BUY ทันที* ที่ด่านสดใหม่ `{best_buy['short_title']}` (`{best_buy['entry_spot']}`) เมื่อแท่งเทียนหยุดไหล"
     elif dist_s <= 6.0:
         action_now = f"🔴 *เตรียมเข้า SELL ทันที* ที่ด่านสดใหม่ `{best_sell['short_title']}` (`{best_sell['entry_spot']}`) เมื่อแรงซื้อชะลอตัว"
@@ -4026,7 +4145,10 @@ def run_once():
         )
 
     ref_spot_est = round((snap.latest_gc_fut or snap.futures_price) - snap.diff, 2)
-    api_live_spot = None if CONFIG["DRY_RUN"] else fetch_realtime_xauusd_spot(ref_spot_est)
+    if CONFIG["DRY_RUN"]:
+        api_live_spot, api_day_high, api_day_low = None, None, None
+    else:
+        api_live_spot, api_day_high, api_day_low = fetch_realtime_xauusd_ohlc(ref_spot_est)
     exact_calc, spot_chart_item = render_xauusd_spot_chart_and_sync_price(
         snap, prev_state, initial_live_spot=api_live_spot
     )
@@ -4080,12 +4202,12 @@ def run_once():
     old_history.append(current_round_entry)
     round_history = old_history[-48:]
 
-    first_touch_map = _evaluate_first_touch_status(exact_calc["spot"], tb, exact_calc["walls_spot"], prev_state, today_str)
+    first_touch_map = _evaluate_first_touch_status(exact_calc["spot"], tb, exact_calc["walls_spot"], prev_state, today_str, day_high=api_day_high, day_low=api_day_low)
     section_messages = synthesize_full_report_messages(snap, exact_calc, cap, CONFIG["GEMINI_API_KEY"], prev_state, round_history, first_touch_map)
     send_telegram_parts(section_messages, CONFIG["TELEGRAM_BOT_TOKEN"], CONFIG["TELEGRAM_CHAT_ID"])
 
     # สร้างและส่ง "ภาพสรุปแผนการเล่นฟันธงฉบับเข้าใจง่าย" ปิดท้ายรายงานเป็นลำดับสุดท้าย
-    final_plan_photo = render_final_plan_summary_image(snap, exact_calc)
+    final_plan_photo = render_final_plan_summary_image(snap, exact_calc, first_touch_map)
     if not CONFIG["DRY_RUN"] and final_plan_photo is not None:
         send_telegram_photos(
             [final_plan_photo],
@@ -4115,6 +4237,8 @@ def run_once():
         "put_wall": snap.put_wall,
         "call_wall": snap.call_wall,
         "max_pain": snap.max_pain,
+        "session_high": first_touch_map.get("_session_high", exact_calc["spot"]),
+        "session_low": first_touch_map.get("_session_low", exact_calc["spot"]),
         "touched_zones": first_touch_map.get("_raw_touched_map", {}),
         "round_history": round_history,
     })
