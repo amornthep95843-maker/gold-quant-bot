@@ -2850,7 +2850,7 @@ def _render_final_plan_via_pillow(
         _draw_txt(
             draw,
             (34, 1056),
-            f"กฎเหล็ก 3 ข้อห้ามทำในรอบนี้:  1) ห้ามกดเข้ากลางทางแถวราคาเปิด ({open_spot:,.2f}) รอให้ราคาวิ่งมาชนจุดเข้าในโพยเท่านั้น",
+            f"กฎเหล็กงานวิจัย (First Touch Only):  1) เข้าเฉพาะครั้งแรกที่ราคาชนเสา/โซนเท่านั้น (ห้ามเข้าซ้ำรอบ 2!) และห้ามเข้ากลางทางแถวราคาเปิด ({open_spot:,.2f})",
             sz=14,
             bold=True,
             fill=(254, 240, 138),
@@ -3357,193 +3357,203 @@ def build_final_master_conclusion(snap: HizeirisSnapshot, exact_calc: Dict) -> s
         f"   3️⃣ *ตั้ง TP และ SL ตามตัวเลขในโพยทุกครั้ง* (ฝั่ง BUY เป้า TP สูงกว่าจุดเข้า / ฝั่ง SELL เป้า TP ต่ำกว่าจุดเข้า) ไม่ถือลุ้นไกลเกิน `+25 จุด` โดยไม่ล็อกกำไร"
     )
 
-def build_clean_section_messages(snap: HizeirisSnapshot, exact_calc: Dict, round_history: List[Dict], ai_audit_text: str = "") -> List[str]:
+
+def _evaluate_first_touch_status(
+    spot: float,
+    tb_morning: Dict[str, float],
+    ws: Dict[str, float],
+    prev_state: Optional[Dict],
+    today_str: str,
+) -> Dict[str, Dict[str, object]]:
+    """
+    กฎเหล็กงานวิจัย First Touch Only (เข้าเฉพาะครั้งแรกที่ราคาวิ่งไปชนเสาหรือโซนเท่านั้น!):
+    - ติดตามจาก session_state.json ตลอดทั้งวันว่าโซนใด (1SD/2SD/3SD BUY/SELL, Put Wall, Call Wall)
+      ยังไม่เคยถูกแตะ (FRESH / เข้าได้) หรือถูกแตะไปแล้วในวันนี้ (USED / ห้ามเข้าซ้ำรอบ 2!)
+    """
+    touched_map: Dict[str, Dict[str, str]] = {}
+    if prev_state and prev_state.get("trading_day") == today_str:
+        touched_map = dict(prev_state.get("touched_zones", {}))
+
+    zones_def = [
+        ("BUY_1SD", "1SD BUY เช้า", float(tb_morning["buy_1sd"]), "BUY"),
+        ("BUY_2SD", "2SD BUY เช้า", float(tb_morning["buy_2sd"]), "BUY"),
+        ("BUY_3SD", "3SD BUY เช้า", float(tb_morning["buy_3sd"]), "BUY"),
+        ("PUT_WALL", "กำแพง Put Wall", float(ws["put_wall_spot"]), "BUY"),
+        ("SELL_1SD", "1SD SELL เช้า", float(tb_morning["sell_1sd"]), "SELL"),
+        ("SELL_2SD", "2SD SELL เช้า", float(tb_morning["sell_2sd"]), "SELL"),
+        ("SELL_3SD", "3SD SELL เช้า", float(tb_morning["sell_3sd"]), "SELL"),
+        ("CALL_WALL", "กำแพง Call Wall", float(ws["call_wall_spot"]), "SELL"),
+    ]
+
+    now_hm = now_th().strftime("%H:%M")
+    status_out: Dict[str, Dict[str, object]] = {}
+
+    for zkey, zlabel, zpx, zside in zones_def:
+        hit_now = (spot <= zpx + 2.5) if zside == "BUY" else (spot >= zpx - 2.5)
+        if zkey not in touched_map and hit_now:
+            touched_map[zkey] = {"time": now_hm, "price": f"{spot:,.2f}", "zone_px": f"{zpx:,.2f}"}
+
+        is_touched = zkey in touched_map
+        touch_info = touched_map.get(zkey)
+        if is_touched:
+            badge = f"⚠️ แตะไปแล้ว ({touch_info['time']} น.) — ห้ามเข้าซ้ำรอบ 2!"
+            short_badge = f"แตะแล้ว {touch_info['time']} (งดซ้ำ)"
+        else:
+            badge = "🆕 สดใหม่ (First Touch — เข้าได้ตามเงื่อนไขวิจัย)"
+            short_badge = "สดใหม่ (First Touch)"
+
+        status_out[zkey] = {
+            "key": zkey,
+            "label": zlabel,
+            "price": zpx,
+            "side": zside,
+            "is_touched": is_touched,
+            "touch_info": touch_info,
+            "badge": badge,
+            "short_badge": short_badge,
+        }
+
+    status_out["_raw_touched_map"] = touched_map
+    return status_out
+
+
+def build_clean_section_messages(
+    snap: HizeirisSnapshot,
+    exact_calc: Dict,
+    round_history: List[Dict],
+    ai_audit_text: str = "",
+    first_touch_map: Optional[Dict[str, Dict[str, object]]] = None,
+) -> List[str]:
+    """
+    ฉบับกระชับ อ่านง่าย ไม่รกแชต (ลดจาก 14 ข้อความ เหลือเพียง 3 ข้อความหลักเท่านั้น!):
+    - ข้อความที่ 1: สรุปหน้างาน + สถานะ First Touch (เข้าเฉพาะครั้งแรก!) + โพยจุดเข้า BUY/SELL ใกล้สุด
+    - ข้อความที่ 2: ข้อมูลเทียบกรอบเช้า 0.8 vs รอบปัจจุบัน (DTE, Put/Call, การเอียงของเส้น IV)
+    - ข้อความที่ 3: บทสรุปฟันธงฉบับเข้าใจง่าย + เหตุผล + โอกาสชนะ + กฎเหล็ก First Touch (ปิดท้ายด้วยภาพสรุปแผน)
+    """
     tb = exact_calc["sd_table_exact"]
-    dyn = exact_calc["cme_dynamic_spot"]
     ws = exact_calc["walls_spot"]
-    zones = exact_calc["six_zone_plans"]
-    tactical = exact_calc["tactical_tickets"]
-    ps = exact_calc["primary_setup"]
-    pc = exact_calc["plan_c_exact"]
-    ts = exact_calc["time_scaling_pts"]
-    va = exact_calc["vol_live_vs_base"]
-    vr = exact_calc["vol_regime_m2"]
-    m4 = exact_calc["m4_micro"]
     mvc = exact_calc["morning_vs_current"]
+    skew_info = mvc["skew_dte_info"]
+    m4 = exact_calc["m4_micro"]
+    tactical = exact_calc["tactical_tickets"]
     spot = exact_calc["spot"]
+    open_spot = exact_calc["open_spot"]
+    ft = first_touch_map or {}
 
-    buy_cheat_lines = "\n\n".join(
-        _format_cheat_sheet_ticket(i, t, spot)
-        for i, t in enumerate(tactical["buy_tickets"][:3], 1)
-    )
-    sell_cheat_lines = "\n\n".join(
-        _format_cheat_sheet_ticket(i, t, spot)
-        for i, t in enumerate(tactical["sell_tickets"][:3], 1)
-    )
+    def _get_ft_badge(ticket: Dict[str, object]) -> Tuple[bool, str]:
+        st = str(ticket.get("short_title", ""))
+        side = str(ticket.get("side", ""))
+        k = ""
+        if "1SD" in st:
+            k = "BUY_1SD" if side == "BUY" else "SELL_1SD"
+        elif "2SD" in st:
+            k = "BUY_2SD" if side == "BUY" else "SELL_2SD"
+        elif "3SD" in st:
+            k = "BUY_3SD" if side == "BUY" else "SELL_3SD"
+        elif "Put Wall" in st:
+            k = "PUT_WALL"
+        elif "Call Wall" in st:
+            k = "CALL_WALL"
+        info = ft.get(k, {})
+        if isinstance(info, dict) and info.get("is_touched"):
+            return True, str(info.get("badge", "⚠️ แตะไปแล้ว — งดเข้าซ้ำ"))
+        return False, "🆕 สดใหม่ (First Touch — เข้าได้)"
 
-    msg_0 = (
-        f"⚡ *สรุปฟันธงหน้างาน (จากราคาปัจจุบันควรเข้าตรงไหน)*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🥇 *ราคา XAU/USD (Spot) ปัจจุบัน*: *`{spot:,.2f}`* _(ตรงกับกราฟ `[ภาพที่ 4]` 100%)_\n"
-        f"• *ราคาเปิดเช้า (ตรงกับตาราง SD·diff หน้าเว็บ)*: Spot *`{exact_calc['open_spot']:,.2f}`* | Futures *`{exact_calc['open_fut']:,.2f}`* (หัก Diff `{snap.diff:.2f}`, IV ตอนเปิด `{exact_calc['open_iv']:.2f}%`, DTE `{snap.fixed_dte}`)\n"
-        f"• *ราคา Futures เทียบ Spot ปัจจุบัน*: `{exact_calc['implied_live_fut']:,.2f}` | Futures ตอนเก็บรอบ OI (`{snap.contract_name}` {snap.round_str}): `{snap.futures_price:,.1f}`\n"
-        f"• *เทียบราคาเปิดเช้า (`{exact_calc['open_spot']:,.2f}`)*: เปลี่ยนแปลง *`{mvc['delta_px_from_open']}` จุด* (`{mvc['z_from_open']}` ของกรอบเช้า `1SD = ±{tb['range_1sd']:.2f}`)\n"
-        f"• *สถานะหน้างาน*: {exact_calc['immediate_verdict']}\n\n"
-        f"🎯 *โพยจุดเข้า–ออกแยกตามด่าน (จุดเข้าเดียวชัดเจน — TP/SL สัมพันธ์กัน 100%)*:\n"
-        f"_(กฎเหล็ก: ฝั่ง BUY เป้า TP ต้องสูงกว่าจุดเข้า และ SL ต้องต่ำกว่าจุดเข้า | ฝั่ง SELL เป้า TP ต้องต่ำกว่าจุดเข้า และ SL ต้องสูงกว่าจุดเข้าเสมอ)_\n\n"
-        f"🟢 *[ฝั่งดัก BUY — แนวรับด้านล่าง เรียงจากใกล้ราคาปัจจุบันที่สุด]*\n\n"
-        f"{buy_cheat_lines}\n\n"
-        f"🔴 *[ฝั่งดัก SELL — แนวต้านด้านบน เรียงจากใกล้ราคาปัจจุบันที่สุด]*\n\n"
-        f"{sell_cheat_lines}"
-    )
-
-    msg_1 = (
-        f"📊 *ส่วนที่ 1: สรุปพารามิเตอร์ & เปรียบเทียบกรอบเช้า (06:30, DTE 0.8) vs รอบปัจจุบัน*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{mvc['morning_vs_now_summary']}\n\n"
-        f"• *สมการกรอบเช้าบนเว็บ (DTE 0.8)*: `1SD = {exact_calc['open_fut']:.1f} × {exact_calc['open_iv']}% × √(0.8/365) = ±{tb['range_1sd']:.2f}` | `2SD = ±{tb['range_2sd']:.2f}` | `3SD = ±{tb['range_3sd']:.2f}`\n"
-        f"• *ตาราง SD·diff หน้าเว็บ*: `1SD = {tb['buy_1sd']:,.2f} / {tb['sell_1sd']:,.2f}` | `2SD = {tb['buy_2sd']:,.2f} / {tb['sell_2sd']:,.2f}` | `3SD = {tb['buy_3sd']:,.2f} / {tb['sell_3sd']:,.2f}`\n"
-        f"• *Vol สด (เส้นเขียว)*: `{va['vol_live']}` vs *Vol Settle (เส้นประแดง)*: `{va['vol_base_settle']}` (`Vol Chg {va['vol_chg']}`)\n"
-        f"  -> _{va['regime']}: {va['impact']}_\n"
-        f"• *Rule of 16 (IV/16)*: กรอบวัน `±{ts['daily_rule16_pct']}%` (`±{ts['daily_rule16_pts']}` จุด) | รายชม. `±{ts['hourly_div_40_8']}` | รายสัปดาห์ `±{ts['weekly_div_7_2']}`\n"
-        f"• *Volatility Regime*: {vr['regime_name']} -> Win Rate `{vr['win_rate']}`\n"
-        f"• *Intraday Volume*: C `{snap.intraday_c:,}` / P `{snap.intraday_p:,}` (`P/C {snap.intraday_pc:.2f}`) | *Open Interest*: C `{snap.oi_c:,}` / P `{snap.oi_p:,}` (`P/C {snap.oi_pc:.2f}`) | Churn: `{snap.churn_str}`\n"
-        f"• *เลขหัวเสา Put/Call บนกราฟ*: `{snap.pillar_labels_text}`\n"
-        f"• *HMM 3-State*: {m4['hmm_state']}\n"
-        f"• *จตุภาค Price-OI*: {m4['quadrant']}\n"
-        f"• *Contrarian PCR*: {m4['pcr_signal']}\n"
-        f"• *Shadow Greeks*: {m4['shadow_greeks']}\n"
-        f"• *โมเดลรถไม่มีเบรก 3 จังหวะ*: {m4['car_model']}\n"
-        f"• *กฎเวลา 0DTE*: {m4['eod_warning']}"
-    )
-
-    msg_2 = (
-        f"🧱 *ส่วนที่ 2: ตารางพิกัดแนวรับ-แนวต้านคืนนี้ (หัก Diff {snap.diff:.2f}: เทียบ Fix เช้า DTE 0.8 vs รอบปัจจุบัน)*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔼 *โซนแนวต้านฝั่งบน (เรียงจากสูงสุดลงมากลาง)*:\n\n"
-        f"1️⃣ *ขอบบน +3SD (5ΔC Extreme Tail)*\n"
-        f"   • พิกัดเข้า SELL (`+{tb['range_3sd']:.2f}`): *`{tb['sell_3sd']:,.2f}`*{check_round_number_bonus(tb['sell_3sd'])} (Fut `{tb['sell_3sd_fut']:,.2f}`)\n"
-        f"   • เป้า TP ขา SELL: `{tb['sell_3sd'] - 25.0:,.2f}` (กำไร `+$25`) / `{tb['sell_3sd'] - 35.0:,.2f}` (กำไร `+$35`) | SL ปกติ: `{tb['sell_3sd'] + 8.0:,.2f}`\n"
-        f"   • พิกัด Dynamic รอบนี้: `{dyn['+3SD_spot']:,.2f}` (Fut `{dyn['+3SD_fut']:,.1f}`, ต่างกัน `{tb['sell_3sd'] - dyn['+3SD_spot']:+.2f}`)\n"
-        f"   • สถิติวิจัย: แตะ `3.7%–7.0%` | เด้งกลับ `86.75%–95.0%` (500d `>=$25` = `91.43%`) | จบสวิง `96.3%`\n\n"
-        f"2️⃣ *ขอบบน +2SD (15ΔC Primary Kill Zone — จุดดัก SELL หลัก)*\n"
-        f"   • พิกัดเข้า SELL (`+{tb['range_2sd']:.2f}`): *`{tb['sell_2sd']:,.2f}`*{check_round_number_bonus(tb['sell_2sd'])} (Fut `{tb['sell_2sd_fut']:,.2f}`)\n"
-        f"   • เป้า TP ขา SELL: `{tb['sell_2sd'] - 15.0:,.2f}` (กำไร `+$15`) / `{tb['sell_2sd'] - 25.0:,.2f}` (กำไร `+$25`) | SL ปกติ: `{tb['sell_2sd'] + 8.0:,.2f}`\n"
-        f"   • พิกัด Dynamic รอบนี้: `{dyn['+2SD_spot']:,.2f}` (Fut `{dyn['+2SD_fut']:,.1f}`, ต่างกัน `{tb['sell_2sd'] - dyn['+2SD_spot']:+.2f}`)\n"
-        f"   • สถิติวิจัย: แตะ `25.9%–28.0%` | เด้งกลับ `78.57%–85.58%` (ทับ OI + IV Crush พุ่งเป็น `86.0%–91.4%`)\n\n"
-        f"3️⃣ *ขอบบน +1SD (25ΔC First Action / Drift Zone)*\n"
-        f"   • พิกัดเข้า SELL (`+{tb['range_1sd']:.2f}`): *`{tb['sell_1sd']:,.2f}`*{check_round_number_bonus(tb['sell_1sd'])} (Fut `{tb['sell_1sd_fut']:,.2f}`)\n"
-        f"   • เป้า TP ขา SELL: `{tb['sell_1sd'] - 8.0:,.2f}` (กำไร `+$8`) / `{tb['sell_1sd'] - 12.0:,.2f}` (กำไร `+$12`) | SL ปกติ: `{tb['sell_1sd'] + 8.0:,.2f}`\n"
-        f"   • พิกัด Dynamic รอบนี้: `{dyn['+1SD_spot']:,.2f}` (Fut `{dyn['+1SD_fut']:,.1f}`, ต่างกัน `{tb['sell_1sd'] - dyn['+1SD_spot']:+.2f}`)\n"
-        f"   • สถิติวิจัย: แตะ `70.0%–77.8%` | ย่อสั้น `$8–$12` ชนะ `70.0%–78.53%` (เอเชีย `82%`) | ไหลต่อ 2SD `40%`\n\n"
-        f"4️⃣ *กำแพง Call Wall & จุดดูด Max Pain ปัจจุบัน (แยกพิกัดชัดเจน)*\n"
-        f"   • Call Wall ({snap.call_wall_pc}): *`{ws['call_wall_spot']:,.2f}`* (Fut `{ws['call_wall_fut']:,.0f}`) -> หากดัก SELL ที่ `{ws['call_wall_spot']:,.2f}` เป้า TP = `{ws['call_wall_spot'] - 10.0:,.2f}` / `{ws['call_wall_spot'] - 25.0:,.2f}` | SL ปกติ = `{ws['call_wall_spot'] + 8.0:,.2f}`\n"
-        f"   • Max Pain (จุดดูดแม่เหล็ก ไม่ใช่จุดดักทุบ): *`{ws['max_pain_spot']:,.2f}`* (Fut `{ws['max_pain_fut']:,.0f}`, ห่างราคาปัจจุบัน `{exact_calc['dist_max_pain']:+.2f}`)\n\n"
-        f"⚓ *แกนกลางวันนี้ (Pivot & ราคาปัจจุบัน)*:\n"
-        f"   • ราคาเปิดเช้า (06:30): *`{exact_calc['open_spot']:,.2f}`* (Fut `{exact_calc['open_fut']:,.2f}`)\n"
-        f"   • 👉 *ราคา XAU/USD ปัจจุบัน (ตรงกับกราฟภาพที่ 4)*: *`{spot:,.2f}`* (Fut เทียบ Spot `{exact_calc['implied_live_fut']:,.2f}`)\n\n"
-        f"🔽 *โซนแนวรับฝั่งล่าง (เรียงจากกลางลงมาต่ำสุด)*:\n\n"
-        f"5️⃣ *กำแพง Put Wall ปัจจุบัน (แยกพิกัดเฉพาะ)*\n"
-        f"   • Put Wall ({snap.put_wall_pc}): *`{ws['put_wall_spot']:,.2f}`* (Fut `{ws['put_wall_fut']:,.0f}`) -> หากดัก BUY ที่ `{ws['put_wall_spot']:,.2f}` เป้า TP = `{ws['put_wall_spot'] + 10.0:,.2f}` / `{ws['put_wall_spot'] + 25.0:,.2f}` | SL ปกติ = `{ws['put_wall_spot'] - 8.0:,.2f}`\n\n"
-        f"6️⃣ *ขอบล่าง -1SD (25ΔP First Support)*\n"
-        f"   • พิกัดเข้า BUY (`-{tb['range_1sd']:.2f}`): *`{tb['buy_1sd']:,.2f}`*{check_round_number_bonus(tb['buy_1sd'])} (Fut `{tb['buy_1sd_fut']:,.2f}`)\n"
-        f"   • เป้า TP ขา BUY: `{tb['buy_1sd'] + 8.0:,.2f}` (กำไร `+$8`) / `{tb['buy_1sd'] + 12.0:,.2f}` (กำไร `+$12`) | SL ปกติ: `{tb['buy_1sd'] - 8.0:,.2f}`\n"
-        f"   • พิกัด Dynamic รอบนี้: `{dyn['-1SD_spot']:,.2f}` (Fut `{dyn['-1SD_fut']:,.1f}`)\n"
-        f"   • สถิติวิจัย: แตะ `70.0%–77.8%` | เด้งสั้น `$8–$12` ชนะ `70.0%–78.53%` (ทับ Put Wall พุ่งเป็น `82%–89%`)\n\n"
-        f"7️⃣ *ขอบล่าง -2SD (15ΔP Primary Kill Zone — จุดดัก BUY หลัก)*\n"
-        f"   • พิกัดเข้า BUY (`-{tb['range_2sd']:.2f}`): *`{tb['buy_2sd']:,.2f}`*{check_round_number_bonus(tb['buy_2sd'])} (Fut `{tb['buy_2sd_fut']:,.2f}`)\n"
-        f"   • เป้า TP ขา BUY: `{tb['buy_2sd'] + 15.0:,.2f}` (กำไร `+$15`) / `{tb['buy_2sd'] + 25.0:,.2f}` (กำไร `+$25`) | SL ปกติ: `{tb['buy_2sd'] - 8.0:,.2f}`\n"
-        f"   • พิกัด Dynamic รอบนี้: `{dyn['-2SD_spot']:,.2f}` (Fut `{dyn['-2SD_fut']:,.1f}`, ต่างกัน `{tb['buy_2sd'] - dyn['-2SD_spot']:+.2f}`)\n"
-        f"   • สถิติวิจัย: แตะ `25.9%–28.0%` | ดีดกลับคำใหญ่ `>=$25` ชนะ `78.57%–85.58%` (ทับ OI + IV Crush = `86%–91.4%`)\n\n"
-        f"8️⃣ *ขอบล่าง -3SD (5ΔP Extreme Tail)*\n"
-        f"   • พิกัดเข้า BUY (`-{tb['range_3sd']:.2f}`): *`{tb['buy_3sd']:,.2f}`*{check_round_number_bonus(tb['buy_3sd'])} (Fut `{tb['buy_3sd_fut']:,.2f}`)\n"
-        f"   • เป้า TP ขา BUY: `{tb['buy_3sd'] + 25.0:,.2f}` (กำไร `+$25`) / `{tb['buy_3sd'] + 35.0:,.2f}` (กำไร `+$35`) | SL ปกติ: `{tb['buy_3sd'] - 8.0:,.2f}`\n"
-        f"   • พิกัด Dynamic รอบนี้: `{dyn['-3SD_spot']:,.2f}` (Fut `{dyn['-3SD_fut']:,.1f}`, ต่างกัน `{tb['buy_3sd'] - dyn['-3SD_spot']:+.2f}`)\n"
-        f"   • สถิติวิจัย: แตะ `3.7%–7.0%` | รอหยุดไหลดีดกลับชนะ `86.75%–95.0%` (500d `>=$25` = `91.43%`)\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚖️ *ส่วนที่ 3: การประเมินความได้เปรียบเชิงสถิติ (Statistical Edge Scorecard)*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔼 *ฝั่งขึ้นหา Call Wall (`{ws['call_wall_spot']:,.2f}`, ห่าง `{exact_calc['dist_call']:+.2f}` จุด)*:\n"
-        f"   • สถานะ: {exact_calc['oi_call_zone']['light']} — {exact_calc['oi_call_zone']['zone']}\n"
-        f"   • โอกาสแตะเป้า: `{exact_calc['oi_call_zone']['touch']}` | โอกาสชนะ +$25: `{exact_calc['oi_call_zone']['win25']}`\n"
-        f"   • กฎประจำโซน: _{exact_calc['oi_call_zone']['rule']}_\n\n"
-        f"🔽 *ฝั่งลงหา Put Wall (`{ws['put_wall_spot']:,.2f}`, ห่าง `{-exact_calc['dist_put']:+.2f}` จุด)*:\n"
-        f"   • สถานะ: {exact_calc['oi_put_zone']['light']} — {exact_calc['oi_put_zone']['zone']}\n"
-        f"   • โอกาสแตะเป้า: `{exact_calc['oi_put_zone']['touch']}` | โอกาสชนะ +$25: `{exact_calc['oi_put_zone']['win25']}`\n"
-        f"   • กฎประจำโซน: _{exact_calc['oi_put_zone']['rule']}_\n\n"
-        f"📊 *ตำแหน่งโซน SD ปัจจุบัน*: {exact_calc['current_sd_zone']['zone_name']}\n"
-        f"   • _{exact_calc['current_sd_zone']['stats']}_\n\n"
-        f"🌍 *แต้มต่อจากวิจัย 0DTE ต่างประเทศ 7 ฉบับ (Module 5)*:\n"
-        f"   • ดักสวนที่กำแพง (`Put Wall / Call Wall / ±2SD`): ชนะ *`70.0%–80.0%`* (ทับ SD + IV Crush = *`85.6%–91.4%`*)\n"
-        f"   • Follow โมเมนตัมเข้าหา OI ระยะ `<$30` (`$25 Rule`): ชนะ *`78.0%–88.5%`*\n"
-        f"   • ไล่ซื้อไม่มี OI รองรับ: ชนะแค่ *`50.0%–52.0%`* | ไล่ทุบซื้อ Put ก้นหลุมตอน IV แพง: ชนะแค่ *`30.0%–40.0%`*"
-    )
-
-    zone_blocks = []
-    for z in zones:
-        dir_label = "ราคาขึ้นสูงกว่าจุดเข้า" if z["side"] == "BUY" else "ราคาลงต่ำกว่าจุดเข้า"
-        rec2_str = f"\n   • 🔄 แก้พอร์ตรวบ 2 ไม้ (SL2 6x): {z['rec2_line']}" if z.get("rec2_line") else ""
-        zone_blocks.append(
-            f"*{z['zone']}*\n"
-            f"   • 📍 พิกัดเข้า {z['side']} เดียวชัดเจน: *`{z['entry_spot']}`* (Futures `{z['entry_fut']}`)\n"
-            f"   • 🎯 เป้าทำกำไร ({dir_label}): {z['tp_line']}\n"
-            f"   • 🛑 SL ปกติ (ตัดขาดทุนตามวิจัย Božović): {z['sl_norm_line']}\n"
-            f"   • 🔄 แก้พอร์ตไม้ 1 (Supa888 2x): {z['rec1_line']}{rec2_str}\n"
-            f"   • 📊 สถิติ & เทียบรอบนี้: _{z['win_rate']}_\n"
-            f"   • 💡 วิธีเล่นตามวิจัย: _{z['research_play']}_"
+    def _compact_ticket(idx: int, t: Dict[str, object]) -> str:
+        dist = round(abs(spot - float(t["entry_spot_num"])), 2)
+        is_used, ft_txt = _get_ft_badge(t)
+        prefix = "⛔ [งดเข้าซ้ำ]" if is_used else ("🟢" if t["side"] == "BUY" else "🔴")
+        return (
+            f"{prefix} *{idx}) {t['short_title']}* (ห่าง `{dist:.2f}` จุด)\n"
+            f"   • สถานะวิจัย: {ft_txt}\n"
+            f"   • 📍 เข้า {t['side']}: *`{t['entry_spot']}`* | 🎯 TP: `{t['tp1']} / {t['tp2']}` | 🛑 SL: `{t['sl_bozovic']}`\n"
+            f"   • 🔄 แก้พอร์ต 2x: คัต `{t['sl1']}` สลับเปิด -> เป้า `{t['rec1_2x_tp']}`"
         )
 
+    fresh_buys = [t for t in tactical["buy_tickets"] if not _get_ft_badge(t)[0]]
+    fresh_sells = [t for t in tactical["sell_tickets"] if not _get_ft_badge(t)[0]]
+    best_buy = fresh_buys[0] if fresh_buys else tactical["buy_tickets"][0]
+    best_sell = fresh_sells[0] if fresh_sells else tactical["sell_tickets"][0]
+
+    buy_cards = "\n\n".join(_compact_ticket(i, t) for i, t in enumerate(tactical["buy_tickets"][:2], 1))
+    sell_cards = "\n\n".join(_compact_ticket(i, t) for i, t in enumerate(tactical["sell_tickets"][:2], 1))
+
+    msg_1 = (
+        f"⚡ *สรุปหน้างาน & โพยจุดเข้า ({snap.contract_name} | {snap.round_str})*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🥇 *Spot ปัจจุบัน*: *`{spot:,.2f}`* _(เปิดเช้า `{open_spot:,.2f}`, เปลี่ยน `{mvc['delta_px_from_open']}` จุด = `{mvc['z_from_open']}`)_\n"
+        f"📐 *กรอบเช้า (DTE 0.8)*: `1SD ±{tb['range_1sd']:.2f}` (`{tb['buy_1sd']:,.2f} / {tb['sell_1sd']:,.2f}`) | `2SD ±{tb['range_2sd']:.2f}` (`{tb['buy_2sd']:,.2f} / {tb['sell_2sd']:,.2f}`)\n"
+        f"🧱 *กำแพง OI ปัจจุบัน*: Put Wall `{ws['put_wall_spot']:,.2f}` | Max Pain `{ws['max_pain_spot']:,.2f}` | Call Wall `{ws['call_wall_spot']:,.2f}`\n"
+        f"🔑 *กฎเหล็กวิจัย (First Touch Only)*: *เข้าออเดอร์เฉพาะ \"ครั้งแรก\" ที่ราคาวิ่งมาชนเสาหรือโซนเท่านั้น!* หากโซนไหนแตะไปแล้วให้ข้ามไปรอโซนสดใหม่ถัดไป\n\n"
+        f"🟢 *[ฝั่งดัก BUY — แนวรับด้านล่าง]*\n"
+        f"{buy_cards}\n\n"
+        f"🔴 *[ฝั่งดัก SELL — แนวต้านด้านบน]*\n"
+        f"{sell_cards}"
+    )
+
+    touched_summary_list = []
+    for zkey in ["BUY_1SD", "BUY_2SD", "PUT_WALL", "SELL_1SD", "SELL_2SD", "CALL_WALL"]:
+        info = ft.get(zkey)
+        if isinstance(info, dict) and info.get("is_touched"):
+            touched_summary_list.append(f"{info['label']} ({info['touch_info']['time']} น.)")
+    touched_str = ", ".join(touched_summary_list) if touched_summary_list else "ยังไม่มีโซนใดถูกแตะ (ทุกด่านสดใหม่ First Touch 100%)"
+
+    msg_2 = (
+        f"📊 *วิเคราะห์เชิงปริมาณ: เทียบกรอบเช้า (0.8) vs รอบนี้ (`DTE {snap.dte:.2f}`)*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"1️⃣ *กรอบเวลา DTE รอบนี้ vs เช้า 0.8*:\n"
+        f"   • เช้า `0.80`: `1SD ±{tb['range_1sd']:.2f}` -> รอบนี้ `DTE {snap.dte:.2f}`: `1SD ±{skew_info['live_r1']}` (`รับ {skew_info['live_buy1']} / ต้าน {skew_info['live_sell1']}`)\n"
+        f"   • ซ้อนทับสำคัญ: {mvc['confluence_str'].splitlines()[0]}\n\n"
+        f"2️⃣ *โฟลว์ Put / Call & โครงสร้างตลาด*:\n"
+        f"   • Intraday `C {snap.intraday_c:,} / P {snap.intraday_p:,}` (`P/C {snap.intraday_pc:.2f}`) | OI `C {snap.oi_c:,} / P {snap.oi_p:,}` (`P/C {snap.oi_pc:.2f}`) | Churn `{snap.churn_str}`\n"
+        f"   • สถานะ: {m4['quadrant']}\n"
+        f"   • {mvc['vs_prev_text'].replace(chr(10), ' | ')}\n\n"
+        f"3️⃣ *การเอียงของเส้น IV (Vol สด vs Vol Settle)*:\n"
+        f"   • {skew_info['skew_direction']}\n"
+        f"   • Put Wing `{skew_info['put_w_live']}` | ATM `{snap.atm_iv:.2f}%` (`Vol Chg {snap.vol_chg:+.2f}%`) | Call Wing `{skew_info['call_w_live']}`\n"
+        f"   • กฎเวลา 0DTE: {m4['eod_warning']}\n\n"
+        f"4️⃣ *บันทึกสถานะ First Touch วันนี้*: {touched_str}"
+    )
+
+    b_win, _ = _compute_setup_win_rate_and_reasons(best_buy, snap, exact_calc, "first")
+    s_win, _ = _compute_setup_win_rate_and_reasons(best_sell, snap, exact_calc, "first")
+    b_pct = re.search(r"([0-9]+\.[0-9]+%\s*[–\-]\s*[0-9]+\.[0-9]+%)", b_win)
+    s_pct = re.search(r"([0-9]+\.[0-9]+%\s*[–\-]\s*[0-9]+\.[0-9]+%)", s_win)
+    b_pct_str = b_pct.group(1) if b_pct else "78.6%–88.5%"
+    s_pct_str = s_pct.group(1) if s_pct else "74.0%–85.6%"
+
+    dist_b = round(abs(spot - float(best_buy["entry_spot_num"])), 2)
+    dist_s = round(abs(float(best_sell["entry_spot_num"]) - spot), 2)
+    if dist_b <= 6.0:
+        action_now = f"🟢 *เตรียมเข้า BUY ทันที* ที่ด่านสดใหม่ `{best_buy['short_title']}` (`{best_buy['entry_spot']}`) เมื่อแท่งเทียนหยุดไหล"
+    elif dist_s <= 6.0:
+        action_now = f"🔴 *เตรียมเข้า SELL ทันที* ที่ด่านสดใหม่ `{best_sell['short_title']}` (`{best_sell['entry_spot']}`) เมื่อแรงซื้อชะลอตัว"
+    elif dist_b <= dist_s:
+        action_now = f"⏳ *ห้ามเข้ากลางอากาศ!* ตั้ง Pending รอ *BUY ด่านสดใหม่แรก* ที่ `{best_buy['entry_spot']}` (ห่าง `{dist_b:.2f}` จุด) และตั้ง SELL ดักด้านบนที่ `{best_sell['entry_spot']}`"
+    else:
+        action_now = f"⏳ *ห้ามเข้ากลางอากาศ!* ตั้ง Pending รอ *SELL ด่านสดใหม่แรก* ที่ `{best_sell['entry_spot']}` (ห่าง `{dist_s:.2f}` จุด) และตั้ง BUY ดักด้านล่างที่ `{best_buy['entry_spot']}`"
+
     msg_3 = (
-        f"🎯 *ส่วนที่ 4: แผนปฏิบัติการเทรดครบทั้ง 6 โซน Fixed SD ตอนเช้า (DTE 0.8) & ระบบแก้พอร์ต Supa888*\n"
+        f"🏆 *บทสรุปฟันธง: แผนการเล่นฉบับเข้าใจง่าย (อิงราคาจริง `{spot:,.2f}`)*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 *แผนหลักหน้างานที่ใกล้ราคาปัจจุบัน (`{spot:,.2f}`) ที่สุด*:\n"
-        f"   • กลยุทธ์: *{ps['title']}*\n"
-        f"   • พิกัดเข้า: {ps['entry']}\n"
-        f"   • เป้าทำกำไร: {ps['tp']}\n"
-        f"   • จุดตัดขาดทุน & แก้พอร์ต: {ps['sl']}\n"
-        f"   • อัตราชนะ: _{ps['win_rate']}_\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        + "\n\n".join(zone_blocks)
-        + f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🚀 *แผนสำรอง (Breakout / Negative Gamma Squeeze 4 เฟส — ใช้เมื่อทะลุกำแพงชัดเจนเท่านั้น)*:\n"
-        f"   • ฝั่งทะลุขึ้น: ยืนเหนือ *`{pc['call_wall_break']:,.2f}`* พร้อม Vol สดพุ่งชัน -> Follow BUY เป้า *`{pc['call_squeeze_tp']:,.2f}`* (กำไร `+12.5` จุด) | SL *`{pc['call_squeeze_sl']:,.2f}`* (`-8.0` จุด)\n"
-        f"   • ฝั่งทะลุลง: ยืนต่ำกว่า *`{pc['put_wall_break']:,.2f}`* พร้อม Vol สดพุ่งชัน -> Follow SELL เป้า *`{pc['put_squeeze_tp']:,.2f}`* (กำไร `+12.5` จุด) | SL *`{pc['put_squeeze_sl']:,.2f}`* (`-8.0` จุด)"
+        f"🚦 *ตอนนี้ควรทำอะไรทันที?*: {action_now}\n\n"
+        f"🟢 *จุดเข้า BUY ที่ดีที่สุดตอนนี้ (First Touch)*: *{best_buy['short_title']}*\n"
+        f"   • เข้า BUY ที่ *`{best_buy['entry_spot']}`* -> TP `{best_buy['tp1']} / {best_buy['tp2']}` | SL ปกติ `{best_buy['sl_bozovic']}` (ชนะ *{b_pct_str}*)\n"
+        f"   • *เหตุผล*: เป็นด่านแนวรับสดใหม่ครั้งแรกของวัน ต่ำกว่าราคาเปิดเช้า `{open_spot - float(best_buy['entry_spot_num']):.2f}` จุด มีกำแพง Put Wall (`{ws['put_wall_spot']:,.2f}`) และจุดดูด Max Pain (`{ws['max_pain_spot']:,.2f}`) หนุนแรงดีดกลับ\n\n"
+        f"🔴 *จุดเข้า SELL ที่ดีที่สุดตอนนี้ (First Touch)*: *{best_sell['short_title']}*\n"
+        f"   • เข้า SELL ที่ *`{best_sell['entry_spot']}`* -> TP `{best_sell['tp1']} / {best_sell['tp2']}` | SL ปกติ `{best_sell['sl_bozovic']}` (ชนะ *{s_pct_str}*)\n"
+        f"   • *เหตุผล*: เป็นด่านแนวต้านสดใหม่ครั้งแรกของวัน สูงกว่าราคาเปิดเช้า `+{float(best_sell['entry_spot_num']) - open_spot:.2f}` จุด แรงซื้อเริ่มตึงตัวและเข้าใกล้กำแพง Call Wall (`{ws['call_wall_spot']:,.2f}`)\n\n"
+        f"⚠️ *กฎเหล็ก 3 ข้อของงานวิจัย*: (1) *เข้าเฉพาะครั้งแรก (First Touch) เท่านั้น* โซนไหนแตะแล้วห้ามเข้าซ้ำ (2) ห้ามกดสวนกลางอากาศแถวราคาเปิด `{open_spot:,.2f}` (3) ห้ามไล่ทุบ SELL ที่แนวรับล่าง และตั้ง TP/SL ตามโพยทุกครั้ง\n"
+        f"👇 _ดูภาพสรุปแผนปิดท้ายด้านล่างเพื่อเช็กพิกัดทั้งหมดในภาพเดียว_"
     )
 
-    history_table_str = _format_round_history_log(round_history)
-    final_audit_text = ai_audit_text.strip() or build_deterministic_quant_audit(snap, exact_calc)
-    ai_block = (
-        f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🤖 *ส่วนที่ 7: ผลการตรวจสอบและวิเคราะห์ซ้ำจากข้อมูลกราฟจริง (Quant Cross-Check)*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{final_audit_text}"
-    )
-
-    msg_4 = (
-        f"🔔 *ส่วนที่ 5: จุดเฝ้าระวังการเปลี่ยนสถานะในรอบถัดไป (Key Quant Triggers)*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"1️⃣ *เช็กช่องว่าง Vol สด (`{va['vol_live']}`) vs Vol Settle (`{va['vol_base_settle']}`) vs IV เช้า (`{va['open_iv']}`)*:\n"
-        f"   • หาก `Vol Chg` ติดลบต่อเนื่องจะหนุน Vanna Bounce ดึงราคากลับเข้าหากรอบใน แต่หากพุ่งบวกแรงให้ระวังการขยายกรอบไปด่าน `±2SD`\n"
-        f"2️⃣ *เช็กการย้ายปั๊มน้ำมัน Intraday Volume (`P/C {snap.intraday_pc:.2f}`, Churn `{snap.churn_str}`)*:\n"
-        f"   • หากรถไต่ไปหาเสาถัดไปไม่ไหว จะไหลถอยหลังกลับมาเติมน้ำมันที่เสาแรก (`{ws['put_wall_spot']:,.2f}` / `{exact_calc['open_spot']:,.2f}`)\n"
-        f"3️⃣ *กฎล็อกเวลา CME*: `00:30/01:30 น.` (Settlement), `06:30 น.` (ล็อกกรอบ `SD·diff` DTE 0.8), `08:30 น.` (สแกน Local Max OI), และ *ห้ามดักสวนเทรนด์ในช่วง 30–60 นาทีสุดท้ายก่อนปิดตลาด (`DTE < 0.04`) เด็ดขาด!*\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📝 *ส่วนที่ 6: สมุดบันทึกประวัติแต่ละรอบของวันนี้ (Intraday Round-by-Round Log)*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{history_table_str}\n\n"
-        f"📌 *SESSION MEMORY*: `Open {exact_calc['open_spot']:.2f} | Now {spot:.2f} ({mvc['delta_px_from_open']}) | 1SD {tb['buy_1sd']:.2f}/{tb['sell_1sd']:.2f} | 2SD {tb['buy_2sd']:.2f}/{tb['sell_2sd']:.2f} | 3SD {tb['buy_3sd']:.2f}/{tb['sell_3sd']:.2f}`"
-        f"{ai_block}"
-    )
-
-    msg_5 = build_final_master_conclusion(snap, exact_calc)
-
-    return [msg_0, msg_1, msg_2, msg_3, msg_4, msg_5]
+    return [msg_1, msg_2, msg_3]
 
 
 def synthesize_full_report_messages(snap: HizeirisSnapshot, exact_calc: Dict, capture: Optional[Dict[str, object]],
-                                    api_key: str, prev_state: Optional[Dict], round_history: List[Dict]) -> List[str]:
+                                    api_key: str, prev_state: Optional[Dict], round_history: List[Dict], first_touch_map: Optional[Dict] = None) -> List[str]:
     if CONFIG["DRY_RUN"] or api_key == "YOUR_GEMINI_API_KEY_HERE" or not capture:
-        return build_clean_section_messages(snap, exact_calc, round_history, build_deterministic_quant_audit(snap, exact_calc))
+        return build_clean_section_messages(snap, exact_calc, round_history, build_deterministic_quant_audit(snap, exact_calc), first_touch_map)
 
     tb = exact_calc["sd_table_exact"]
     ws = exact_calc["walls_spot"]
@@ -3572,7 +3582,7 @@ def synthesize_full_report_messages(snap: HizeirisSnapshot, exact_calc: Dict, ca
     except Exception:
         ai_audit = build_deterministic_quant_audit(snap, exact_calc)
 
-    return build_clean_section_messages(snap, exact_calc, round_history, ai_audit)
+    return build_clean_section_messages(snap, exact_calc, round_history, ai_audit, first_touch_map)
 
 
 def _prepare_fast_telegram_image(path: str) -> str:
@@ -3908,7 +3918,8 @@ def run_once():
     old_history.append(current_round_entry)
     round_history = old_history[-48:]
 
-    section_messages = synthesize_full_report_messages(snap, exact_calc, cap, CONFIG["GEMINI_API_KEY"], prev_state, round_history)
+    first_touch_map = _evaluate_first_touch_status(exact_calc["spot"], tb, exact_calc["walls_spot"], prev_state, today_str)
+    section_messages = synthesize_full_report_messages(snap, exact_calc, cap, CONFIG["GEMINI_API_KEY"], prev_state, round_history, first_touch_map)
     send_telegram_parts(section_messages, CONFIG["TELEGRAM_BOT_TOKEN"], CONFIG["TELEGRAM_CHAT_ID"])
 
     # สร้างและส่ง "ภาพสรุปแผนการเล่นฟันธงฉบับเข้าใจง่าย" ปิดท้ายรายงานเป็นลำดับสุดท้าย
@@ -3942,6 +3953,7 @@ def run_once():
         "put_wall": snap.put_wall,
         "call_wall": snap.call_wall,
         "max_pain": snap.max_pain,
+        "touched_zones": first_touch_map.get("_raw_touched_map", {}),
         "round_history": round_history,
     })
     print("🎉 ส่งรูปกราฟ 4 ภาพ และรายงานที่ล็อกราคาเปิดตรงกับหน้าเว็บ Hizeiris 100% เข้า Telegram เสร็จสมบูรณ์!")
