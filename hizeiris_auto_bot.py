@@ -4054,6 +4054,96 @@ def load_state(path: str) -> Optional[Dict]:
     return None
 
 
+def write_mt5_signal_files(
+    snap: HizeirisSnapshot,
+    exact_calc: Dict,
+    first_touch_map: Dict[str, Dict[str, object]],
+    today_str: str,
+) -> None:
+    """
+    สร้างไฟล์สัญญาณ mt5_signal.txt และ mt5_signal.json อัปเดตขึ้น GitHub ทุกรอบ
+    เพื่อให้ EA HizeirisQuantMT5.mq5 บน Exness MT5 ดึงไปตั้ง Pending Limit อัตโนมัติ (First Touch Only + DTE Lock)
+    """
+    ws = exact_calc["walls_spot"]
+    zones = exact_calc["six_zone_plans"]
+    tactical = exact_calc["tactical_tickets"]
+    dte_lock = 1 if snap.dte < 0.04 else 0
+
+    def _find_wall_ticket(side_tickets: List[Dict], kw: str) -> Optional[Dict]:
+        for t in side_tickets:
+            if kw in str(t.get("short_title", "")):
+                return t
+        return None
+
+    pw_t = _find_wall_ticket(tactical["buy_tickets"], "Put Wall")
+    cw_t = _find_wall_ticket(tactical["sell_tickets"], "Call Wall")
+
+    signal_rows = [
+        ("BUY_1SD", zones[3]),
+        ("BUY_2SD", zones[4]),
+        ("SELL_1SD", zones[0]),
+        ("SELL_2SD", zones[1]),
+    ]
+    if pw_t:
+        signal_rows.append(("PUT_WALL", pw_t))
+    if cw_t:
+        signal_rows.append(("CALL_WALL", cw_t))
+
+    lines = [
+        f"TRADING_DAY={today_str}",
+        f"UPDATED_TH={now_th().strftime('%Y-%m-%d %H:%M')}",
+        f"CONTRACT={snap.contract_name}",
+        f"ROUND_STR={snap.round_str}",
+        f"DTE={snap.dte:.2f}",
+        f"DTE_LOCK={dte_lock}",
+        f"OPEN_SPOT={exact_calc['open_spot']:.2f}",
+        f"SPOT_NOW={exact_calc['spot']:.2f}",
+        f"PUT_WALL={ws['put_wall_spot']:.2f}",
+        f"CALL_WALL={ws['call_wall_spot']:.2f}",
+        f"MAX_PAIN={ws['max_pain_spot']:.2f}",
+    ]
+
+    json_zones = []
+    for zid, t in signal_rows:
+        ft_info = first_touch_map.get(zid, {})
+        st_str = str(ft_info.get("status", "FRESH")) if isinstance(ft_info, dict) else "FRESH"
+        entry_num = float(t["entry_spot_num"])
+        tp1_num = float(t["tp1_num"])
+        tp2_num = float(t["tp2_num"])
+        sl_norm_num = float(t["sl_normal_num"])
+        sl1_num = float(t["sl1_num"])
+        rec1_tp_num = float(t["rec1_2x_tp_num"])
+        side_str = str(t["side"])
+
+        lines.append(
+            f"ZONE|{zid}|{side_str}|{entry_num:.2f}|{tp1_num:.2f}|{tp2_num:.2f}|{sl_norm_num:.2f}|{sl1_num:.2f}|{rec1_tp_num:.2f}|{st_str}"
+        )
+        json_zones.append({
+            "id": zid, "side": side_str, "entry": entry_num,
+            "tp1": tp1_num, "tp2": tp2_num, "sl_normal": sl_norm_num,
+            "sl_rec1": sl1_num, "rec1_tp": rec1_tp_num, "status": st_str,
+        })
+
+    with open("mt5_signal.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    with open("mt5_signal.json", "w", encoding="utf-8") as f:
+        json.dump({
+            "trading_day": today_str,
+            "updated_th": now_th().strftime("%Y-%m-%d %H:%M"),
+            "contract": snap.contract_name,
+            "round_str": snap.round_str,
+            "dte": snap.dte,
+            "dte_lock": bool(dte_lock),
+            "open_spot": exact_calc["open_spot"],
+            "spot_now": exact_calc["spot"],
+            "put_wall": ws["put_wall_spot"],
+            "call_wall": ws["call_wall_spot"],
+            "max_pain": ws["max_pain_spot"],
+            "zones": json_zones,
+        }, f, ensure_ascii=False, indent=2)
+    print("📡 อัปเดตไฟล์สัญญาณ MT5 (mt5_signal.txt & mt5_signal.json) สำเร็จ!")
+
+
 def save_and_push_state(path: str, state: Dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
@@ -4063,7 +4153,7 @@ def save_and_push_state(path: str, state: Dict) -> None:
                 'git config --local user.email "bot@github.com" && '
                 'git config --local user.name "Hizeiris Quant Bot" && '
                 'git pull --rebase --autostash || true && '
-                'git add session_state.json hizeiris_auto_bot.py && '
+                'git add session_state.json hizeiris_auto_bot.py mt5_signal.txt mt5_signal.json && '
                 '(git diff --staged --quiet || git commit -m "Update round history state") && '
                 '(git push || true)',
                 shell=True,
@@ -4215,6 +4305,7 @@ def run_once():
             CONFIG["TELEGRAM_CHAT_ID"],
         )
 
+    write_mt5_signal_files(snap, exact_calc, first_touch_map, today_str)
     save_and_push_state(CONFIG["STATE_FILE"], {
         "trading_day": today_str,
         "timestamp": snap.timestamp,
