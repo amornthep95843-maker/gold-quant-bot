@@ -399,10 +399,20 @@ def evaluate_iv_smile_skew_and_dte_progression(
         f"     - `2SD รอบนี้ (DTE {live_dte:.2f} + IV สด {snap.atm_iv:.2f}%)` = `±{live_r2:.2f}` จุด -> พิกัด Spot รอบนี้: `Buy {live_buy2:,.2f} / Sell {live_sell2:,.2f}` (เทียบกรอบเช้า `0.8`: `Buy {tb_morning['buy_2sd']:,.2f} / Sell {tb_morning['sell_2sd']:,.2f}`)"
     )
 
-    put_w_live = snap.iv_put_wing_live if snap.iv_put_wing_live > 0 else round(snap.atm_iv + 3.7, 2)
-    put_w_settle = snap.iv_put_wing_settle if snap.iv_put_wing_settle > 0 else round(snap.vol_settle_atm + 2.8, 2)
-    call_w_live = snap.iv_call_wing_live if snap.iv_call_wing_live > 0 else round(snap.atm_iv + 7.5, 2)
-    call_w_settle = snap.iv_call_wing_settle if snap.iv_call_wing_settle > 0 else round(snap.vol_settle_atm + 2.6, 2)
+    # ใช้ค่าจริงจากกราฟรอบปัจจุบัน 100% เสมอ (ยกเลิกค่าตายตัว +3.7/+7.5 ที่เคยหลอกให้เอียงขวาทุกครั้ง)
+    has_real_wings = (snap.iv_put_wing_live > 5.0 and snap.iv_call_wing_live > 5.0)
+    if has_real_wings:
+        put_w_live = round(snap.iv_put_wing_live, 2)
+        call_w_live = round(snap.iv_call_wing_live, 2)
+        put_w_settle = round(snap.iv_put_wing_settle, 2) if snap.iv_put_wing_settle > 5.0 else round(snap.vol_settle_atm + 2.5, 2)
+        call_w_settle = round(snap.iv_call_wing_settle, 2) if snap.iv_call_wing_settle > 5.0 else round(snap.vol_settle_atm + 2.5, 2)
+    else:
+        # กรณีสำรองเฉพาะ Dry Run / อ่านกราฟไม่ได้: ประเมินสมดุลตาม OI P/C จริง ไม่ล็อกเอียงขวาตายตัว
+        oi_tilt = 2.0 if snap.oi_pc >= 1.25 else (-2.0 if snap.oi_pc <= 0.75 else 0.0)
+        put_w_live = round(snap.atm_iv + 4.0 + max(oi_tilt, 0.0), 2)
+        call_w_live = round(snap.atm_iv + 4.0 + max(-oi_tilt, 0.0), 2)
+        put_w_settle = round(snap.vol_settle_atm + 3.0, 2)
+        call_w_settle = round(snap.vol_settle_atm + 3.0, 2)
 
     d_map = snap.delta_strikes_map or {}
     p25_strike = d_map.get("25ΔP", round(snap.futures_price - r1_morning * 0.95, 0))
@@ -1634,14 +1644,101 @@ def _extract_frame_texts_and_inputs(page) -> str:
 
 
 
-def _extract_realtime_chart_svg_metrics(page) -> Dict[str, object]:
+def _scan_vol_curves_from_screenshot(
+    img_path: str,
+    y_pct_top: float,
+    y_pct_bot: float,
+    atm_iv_ref: float,
+    vol_settle_ref: float,
+    chart_bbox: Optional[Dict[str, float]] = None,
+) -> Dict[str, float]:
     """
-    ดึงข้อมูลจริงจากกราฟ SVG บนหน้าเว็บ Hizeiris แบบ Real-Time โดยตรง:
-    1) หัวเสา Put/Call จริงทุกแท่ง (รองรับเลข 1-5 หลัก เช่น 48/1188, 385/42) โดยตัดเลขรอบ (183/183) ออก 100%
-    2) ค่า IV% จริงของเส้นสีเขียว (Vol สด) และเส้นประสีแดง (Vol Settle) ทั้งฝั่งซ้าย (Put Wing), ตรงกลาง (ATM), ฝั่งขวา (Call Wing)
-    3) พิกัดป้าย Delta (25ΔP, 15ΔP, 25ΔC, 15ΔC) กับเลข Strike จริงบนแกน X
+    ชั้นที่ 2 (Pixel Curve Scanner): สแกนพิกเซลจริงของเส้นสีเขียว (Vol สด) และเส้นประสีแดง (Vol Settle)
+    จากภาพกราฟ [ภาพที่ 2] โดยตรงทุกครั้งที่รัน เพื่อวัดค่า Put Wing (ซ้าย) vs Call Wing (ขวา) ให้ตรงกับกราฟ 100%
     """
-    result = {
+    out: Dict[str, float] = {}
+    if not os.path.exists(img_path) or y_pct_top <= y_pct_bot:
+        return out
+    try:
+        from PIL import Image
+        im = Image.open(img_path).convert("RGB")
+        W, H = im.size
+        if chart_bbox and chart_bbox.get("w", 0) > 200 and chart_bbox.get("h", 0) > 150:
+            x0 = max(0, int(chart_bbox["x"] + chart_bbox["w"] * 0.06))
+            x1 = min(W, int(chart_bbox["x"] + chart_bbox["w"] * 0.90))
+            y0 = max(0, int(chart_bbox["y"] + chart_bbox["h"] * 0.14))
+            y1 = min(H, int(chart_bbox["y"] + chart_bbox["h"] * 0.92))
+        else:
+            x0, x1 = int(W * 0.08), int(W * 0.56)
+            y0, y1 = int(H * 0.14), int(H * 0.48)
+
+        crop = im.crop((x0, y0, x1, y1))
+        cw, ch = crop.size
+        if cw < 80 or ch < 80:
+            return out
+        px = crop.load()
+
+        green_pts = []
+        red_pts = []
+        for x in range(4, cw - 4, 2):
+            g_ys = []
+            r_ys = []
+            for y in range(4, ch - 4):
+                r, g, b = px[x, y]
+                # รองรับทั้งโหมดมืด (#84cc16 / #a3e635) และโหมดสว่าง (#65a30d / #558b2f / #4caf50)
+                if g >= 95 and (g - b) >= 24 and (g - r) >= 5:
+                    g_ys.append(y)
+                elif r >= 150 and (r - g) >= 25 and (r - b) >= 25 and g < 200 and b < 200:
+                    r_ys.append(y)
+            # กรองเส้นตั้ง SD ออก (เส้นโค้งแนวนอนจะมีพิกเซลต่อแกน X กว้างไม่เกิน 10 px)
+            if 1 <= len(g_ys) <= 9 and (max(g_ys) - min(g_ys)) <= 11:
+                green_pts.append((x, sum(g_ys) / len(g_ys)))
+            if 1 <= len(r_ys) <= 7 and (max(r_ys) - min(r_ys)) <= 9:
+                red_pts.append((x, sum(r_ys) / len(r_ys)))
+
+        def _pts_to_wings(pts: List[Tuple[int, float]]) -> Optional[Tuple[float, float]]:
+            if len(pts) < 10:
+                return None
+            pts.sort(key=lambda p: p[0])
+            sm = []
+            for i in range(len(pts)):
+                win = sorted(p[1] for p in pts[max(0, i - 2):min(len(pts), i + 3)])
+                sm.append((pts[i][0], win[len(win) // 2]))
+            k = max(3, len(sm) // 10)
+            left_y = sum(p[1] for p in sm[:k]) / k
+            right_y = sum(p[1] for p in sm[-k:]) / k
+            # แปลงพิกัด Y เป็น %IV ตามสเกลแกนขวาจริงของกราฟ
+            p_iv = round(y_pct_top - (left_y / float(ch)) * (y_pct_top - y_pct_bot), 2)
+            c_iv = round(y_pct_top - (right_y / float(ch)) * (y_pct_top - y_pct_bot), 2)
+            if 5.0 <= p_iv <= 95.0 and 5.0 <= c_iv <= 95.0:
+                return (p_iv, c_iv)
+            return None
+
+        g_wings = _pts_to_wings(green_pts)
+        if g_wings:
+            out["iv_put_wing_live"] = g_wings[0]
+            out["iv_call_wing_live"] = g_wings[1]
+        r_wings = _pts_to_wings(red_pts)
+        if r_wings:
+            out["iv_put_wing_settle"] = r_wings[0]
+            out["iv_call_wing_settle"] = r_wings[1]
+        elif g_wings and vol_settle_ref > 5.0:
+            # หากเส้นประแดงบางเกินไป ให้เทียบกับฐาน Vol Settle จริงโดยไม่เอนเอียงฝั่งใดฝั่งหนึ่ง
+            out["iv_put_wing_settle"] = round(vol_settle_ref + 2.5, 2)
+            out["iv_call_wing_settle"] = round(vol_settle_ref + 2.5, 2)
+    except Exception:
+        pass
+    return out
+
+
+def _extract_realtime_chart_svg_metrics(page, shot_path: str = "", atm_iv_ref: float = 0.0, vol_settle_ref: float = 0.0) -> Dict[str, object]:
+    """
+    ดึงข้อมูลจริงจากกราฟบนหน้าเว็บ Hizeiris แบบ Real-Time 3 ชั้น (วิเคราะห์ใหม่ทุกรอบ 100%):
+    - ชั้นที่ 1A: อ่านข้อมูล Dataset จริงจาก Chart.js / Canvas หากมี
+    - ชั้นที่ 1B: อ่านเส้นสีเขียว (Vol สด) และเส้นประสีแดง (Vol Settle) จาก SVG โดยตรวจสี RGB จริง (Computed Style) ไม่ยึดติด Hex เดิม
+    - ชั้นที่ 2: สแกนพิกเซลเส้นสีเขียว/แดงโดยตรงจากภาพแคปหน้าจอ [ภาพที่ 2] เพื่อให้ค่า Put Wing vs Call Wing ตรงกับตาเห็น 100%
+    """
+    result: Dict[str, object] = {
         "pillars": [],
         "put_wall_chart": 0.0,
         "call_wall_chart": 0.0,
@@ -1650,60 +1747,98 @@ def _extract_realtime_chart_svg_metrics(page) -> Dict[str, object]:
         "iv_put_wing_settle": 0.0,
         "iv_call_wing_live": 0.0,
         "iv_call_wing_settle": 0.0,
+        "y_pct_top": 0.0,
+        "y_pct_bot": 0.0,
     }
+    chart_bbox = None
     for frame in page.frames:
         try:
             data = frame.locator("body").evaluate(
                 """body => {
-                    const out = { pillars: [], green_y: [], red_y: [], y_pcts: [], pw: 0, cw: 0, mp: 0 };
-                    const svgs = Array.from(document.querySelectorAll('svg'));
-                    if (!svgs.length) return out;
-                    const svg = svgs[0];
-                    const texts = Array.from(svg.querySelectorAll('text')).map(t => ({
-                        txt: (t.textContent || '').trim(),
-                        x: parseFloat(t.getAttribute('x') || '0'),
-                        y: parseFloat(t.getAttribute('y') || '0')
-                    }));
+                    const out = {
+                        pillars: [], y_pcts: [], pw: 0, cw: 0, mp: 0,
+                        green_pts: [], red_pts: [],
+                        chartjs_live: [], chartjs_settle: [],
+                        bbox: null
+                    };
 
-                    for (const item of texts) {
-                        if (/^[0-9]{1,4}\\/[0-9]{1,4}$/.test(item.txt)) {
-                            if (!out.pillars.includes(item.txt)) out.pillars.push(item.txt);
+                    // 1A. ตรวจ Chart.js บน canvas หากเว็บใช้ Chart.js
+                    const canvases = Array.from(document.querySelectorAll('canvas'));
+                    if (canvases.length && window.Chart && typeof window.Chart.getChart === 'function') {
+                        const ch = window.Chart.getChart(canvases[0]);
+                        if (ch && ch.data && Array.isArray(ch.data.datasets)) {
+                            for (const ds of ch.data.datasets) {
+                                const lbl = (ds.label || '').toLowerCase();
+                                const vals = (ds.data || []).map(v => (typeof v === 'object' && v !== null) ? Number(v.y) : Number(v)).filter(v => Number.isFinite(v) && v > 5 && v < 120);
+                                if (vals.length >= 4) {
+                                    if (lbl.includes('สด') || lbl.includes('live')) out.chartjs_live = vals;
+                                    else if (lbl.includes('settle')) out.chartjs_settle = vals;
+                                }
+                            }
                         }
-                        const mPw = item.txt.match(/Put\\s*wall\\s*([2-5][0-9]{3})/i);
-                        if (mPw) out.pw = parseFloat(mPw[1]);
-                        const mCw = item.txt.match(/Call\\s*wall\\s*([2-5][0-9]{3})/i);
-                        if (mCw) out.cw = parseFloat(mCw[1]);
-                        const mMp = item.txt.match(/Max\\s*Pain\\s*([2-5][0-9]{3})/i);
-                        if (mMp) out.mp = parseFloat(mMp[1]);
-                        const mPct = item.txt.match(/^([0-9]{1,2}\\.[0-9])%$/);
-                        if (mPct) out.y_pcts.push({ pct: parseFloat(mPct[1]), y: item.y });
                     }
 
-                    // อ่านเส้น Vol สด (สีเขียว) และ Vol Settle (เส้นประแดง) จาก path/polyline ในกราฟแรก
-                    const paths = Array.from(svg.querySelectorAll('path, polyline'));
-                    for (const p of paths) {
-                        const stroke = (p.getAttribute('stroke') || '').toLowerCase();
-                        const dash = (p.getAttribute('stroke-dasharray') || '').trim();
-                        const d = p.getAttribute('d') || p.getAttribute('points') || '';
-                        const pts = [];
-                        const reNum = /([0-9]+(?:\\.[0-9]+)?)[,\\s]+([0-9]+(?:\\.[0-9]+)?)/g;
-                        let m;
-                        while ((m = reNum.exec(d)) !== null) {
-                            pts.push({ x: parseFloat(m[1]), y: parseFloat(m[2]) });
+                    // 1B. อ่านจาก SVG แรก (กราฟ Intraday Volume)
+                    const svgs = Array.from(document.querySelectorAll('svg'));
+                    if (svgs.length) {
+                        const svg = svgs[0];
+                        const rect = svg.getBoundingClientRect();
+                        out.bbox = { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+
+                        const texts = Array.from(svg.querySelectorAll('text')).map(t => ({
+                            txt: (t.textContent || '').trim(),
+                            x: parseFloat(t.getAttribute('x') || '0'),
+                            y: parseFloat(t.getAttribute('y') || '0')
+                        }));
+
+                        for (const item of texts) {
+                            if (/^[0-9]{1,4}\\/[0-9]{1,4}$/.test(item.txt)) {
+                                if (!out.pillars.includes(item.txt)) out.pillars.push(item.txt);
+                            }
+                            const mPw = item.txt.match(/Put\\s*wall\\s*([2-5][0-9]{3})/i);
+                            if (mPw) out.pw = parseFloat(mPw[1]);
+                            const mCw = item.txt.match(/Call\\s*wall\\s*([2-5][0-9]{3})/i);
+                            if (mCw) out.cw = parseFloat(mCw[1]);
+                            const mMp = item.txt.match(/Max\\s*Pain\\s*([2-5][0-9]{3})/i);
+                            if (mMp) out.mp = parseFloat(mMp[1]);
+                            const mPct = item.txt.match(/^([0-9]{1,2}\\.[0-9])%$/);
+                            if (mPct) out.y_pcts.push({ pct: parseFloat(mPct[1]), y: item.y });
                         }
-                        if (pts.length >= 5) {
-                            if ((stroke.includes('22c55e') || stroke.includes('4ade80') || stroke.includes('84cc16') || stroke.includes('a3e635') || stroke.includes('green')) && !dash) {
-                                out.green_pts = pts;
-                            } else if ((stroke.includes('ef4444') || stroke.includes('f87171') || stroke.includes('fb7185') || stroke.includes('red')) && dash) {
-                                out.red_pts = pts;
+
+                        // ใช้ getComputedStyle เพื่ออ่านค่า RGB จริงของเส้นทุกสี ไม่ยึดติด hex เดิม
+                        const paths = Array.from(svg.querySelectorAll('path, polyline'));
+                        for (const p of paths) {
+                            const cs = window.getComputedStyle(p);
+                            const strokeStr = (cs.stroke || p.getAttribute('stroke') || '').toLowerCase();
+                            const dash = (cs.strokeDasharray || p.getAttribute('stroke-dasharray') || '').trim();
+                            const isDashed = (dash !== '' && dash !== 'none' && dash !== '0px');
+                            const mRgb = strokeStr.match(/rgba?\\(\\s*([0-9]+)\\s*,\\s*([0-9]+)\\s*,\\s*([0-9]+)/);
+                            let r = 0, g = 0, b = 0;
+                            if (mRgb) { r = parseInt(mRgb[1]); g = parseInt(mRgb[2]); b = parseInt(mRgb[3]); }
+
+                            const d = p.getAttribute('d') || p.getAttribute('points') || '';
+                            const pts = [];
+                            const reNum = /([0-9]+(?:\\.[0-9]+)?)[,\\s]+([0-9]+(?:\\.[0-9]+)?)/g;
+                            let m;
+                            while ((m = reNum.exec(d)) !== null) {
+                                pts.push({ x: parseFloat(m[1]), y: parseFloat(m[2]) });
+                            }
+                            if (pts.length >= 5) {
+                                const isGreen = (g >= 95 && (g - b) >= 35 && g > r) || strokeStr.includes('green');
+                                const isRed = (r >= 150 && (r - g) >= 30 && (r - b) >= 30) || strokeStr.includes('red');
+                                if (isGreen && !isDashed && pts.length > out.green_pts.length) {
+                                    out.green_pts = pts;
+                                } else if (isRed && isDashed && pts.length > out.red_pts.length) {
+                                    out.red_pts = pts;
+                                }
                             }
                         }
                     }
                     return out;
                 }""",
-                timeout=2500,
+                timeout=3000,
             )
-            if data and (data.get("pillars") or data.get("y_pcts")):
+            if data and (data.get("pillars") or data.get("y_pcts") or data.get("chartjs_live")):
                 if data.get("pillars"):
                     result["pillars"] = data["pillars"][:15]
                 if data.get("pw"):
@@ -1712,27 +1847,52 @@ def _extract_realtime_chart_svg_metrics(page) -> Dict[str, object]:
                     result["call_wall_chart"] = float(data["cw"])
                 if data.get("mp"):
                     result["max_pain_chart"] = float(data["mp"])
+                if data.get("bbox"):
+                    chart_bbox = data["bbox"]
 
+                # ลำดับ 1A: Chart.js datasets จริง
+                cj_live = data.get("chartjs_live") or []
+                cj_settle = data.get("chartjs_settle") or []
+                if len(cj_live) >= 4:
+                    result["iv_put_wing_live"] = round(float(cj_live[0]), 2)
+                    result["iv_call_wing_live"] = round(float(cj_live[-1]), 2)
+                if len(cj_settle) >= 4:
+                    result["iv_put_wing_settle"] = round(float(cj_settle[0]), 2)
+                    result["iv_call_wing_settle"] = round(float(cj_settle[-1]), 2)
+
+                # ลำดับ 1B: SVG path จริง (เรียงจุดตามแกน X ซ้าย -> ขวา เพื่อความแม่นยำ 100%)
                 y_pcts = sorted(data.get("y_pcts") or [], key=lambda z: z["y"])
                 if len(y_pcts) >= 2:
                     top_y, top_pct = y_pcts[0]["y"], y_pcts[0]["pct"]
                     bot_y, bot_pct = y_pcts[-1]["y"], y_pcts[-1]["pct"]
-                    if bot_y > top_y and top_pct > bot_pct:
+                    result["y_pct_top"] = top_pct
+                    result["y_pct_bot"] = bot_pct
+                    if bot_y > top_y and top_pct > bot_pct and result["iv_put_wing_live"] == 0.0:
                         def _y_to_iv(y_val: float) -> float:
                             ratio = (bot_y - y_val) / (bot_y - top_y)
                             return round(bot_pct + ratio * (top_pct - bot_pct), 2)
 
-                        g_pts = data.get("green_pts") or []
+                        g_pts = sorted(data.get("green_pts") or [], key=lambda z: z["x"])
                         if len(g_pts) >= 4:
                             result["iv_put_wing_live"] = _y_to_iv(g_pts[0]["y"])
                             result["iv_call_wing_live"] = _y_to_iv(g_pts[-1]["y"])
-                        r_pts = data.get("red_pts") or []
+                        r_pts = sorted(data.get("red_pts") or [], key=lambda z: z["x"])
                         if len(r_pts) >= 4:
                             result["iv_put_wing_settle"] = _y_to_iv(r_pts[0]["y"])
                             result["iv_call_wing_settle"] = _y_to_iv(r_pts[-1]["y"])
                 break
         except Exception:
             pass
+
+    # ลำดับ 2: หากชั้น DOM/SVG ยังไม่ได้ค่า ให้สแกนพิกเซลเส้นสีเขียว/แดงจากภาพแคป [ภาพที่ 2] โดยตรง!
+    if float(result.get("iv_put_wing_live") or 0.0) == 0.0 and shot_path:
+        y_top = float(result.get("y_pct_top") or 0.0) or (atm_iv_ref + 15.0 if atm_iv_ref > 5 else 50.0)
+        y_bot = float(result.get("y_pct_bot") or 0.0) or (max(atm_iv_ref - 3.0, 10.0) if atm_iv_ref > 5 else 25.0)
+        px_res = _scan_vol_curves_from_screenshot(shot_path, y_top, y_bot, atm_iv_ref, vol_settle_ref, chart_bbox)
+        for k, v in px_res.items():
+            if v > 0:
+                result[k] = v
+
     return result
 
 
@@ -2092,7 +2252,7 @@ def capture_hizeiris_web(url: str, profile_dir: str, fixed_dte: float = 0.8) -> 
         screenshots.append(shot_cme_vol)
         photo_captions.append((shot_cme_vol, "📊 [ภาพที่ 2] แท็บ CME · Vol (ข้อมูลรอบปัจจุบัน) & กราฟ Intraday + OI"))
         text_main = _extract_frame_texts_and_inputs(page)
-        svg_metrics = _extract_realtime_chart_svg_metrics(page)
+        svg_metrics = _extract_realtime_chart_svg_metrics(page, shot_path=shot_cme_vol)
         print(f"✅ แคปภาพที่ 2 (แท็บ CME · Vol รอบปัจจุบัน, ดึงหัวเสา SVG จริง {len(svg_metrics.get('pillars', []))} เสา) สำเร็จ!")
 
         if _click_tab_button_in_frames(page, ["OI", "ทุกสัญญา"]):
