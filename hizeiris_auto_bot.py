@@ -3947,33 +3947,64 @@ def run_once():
     print("🎉 ส่งรูปกราฟ 4 ภาพ และรายงานที่ล็อกราคาเปิดตรงกับหน้าเว็บ Hizeiris 100% เข้า Telegram เสร็จสมบูรณ์!")
 
 
+def _compute_next_sleep_seconds(now: datetime) -> Tuple[int, str]:
+    """
+    คำนวณเวลานอนรอถึงรอบถัดไป (อิงเวลาไทย UTC+7):
+    - ช่วง 06:00–06:26 น.: ตื่นซิงค์ราคาเปิดเช้า 06:28 น.
+    - ช่วงตลาดพีค 19:00–23:00 น. (NY Open & Peak): อัปเดตถี่ทุก 15 นาที ที่นาที :04, :19, :34, :49
+      (หลังข้อมูลรอบ :00, :15, :30, :45 เข้าเว็บ Hizeiris ตอน +2.1 นาทีเสร็จเรียบร้อย)
+    - ช่วงเวลาอื่นๆ: อัปเดตทุก 30 นาที ที่นาที :04 และ :34
+    """
+    if now.hour == 6 and now.minute < 26:
+        target_sec = (28 - now.minute) * 60 - now.second
+        return max(target_sec, 120), "ซิงค์ราคาเปิดเช้า 06:28 น."
+
+    is_peak_15m = (19 <= now.hour < 23) or (now.hour == 23 and now.minute < 2)
+    if is_peak_15m:
+        sec_since_target = ((now.minute - 4) % 15) * 60 + now.second
+        sleep_sec = 900 - sec_since_target
+        if sleep_sec < 180:
+            sleep_sec += 900
+        return sleep_sec, "โหมดตลาดพีค 19:00–23:00 น. (ทุก 15 นาที ที่ :04/:19/:34/:49)"
+
+    sec_since_target = ((now.minute - 4) % 30) * 60 + now.second
+    sleep_sec = 1800 - sec_since_target
+    if sleep_sec < 300:
+        sleep_sec += 1800
+    return sleep_sec, "โหมดปกติ (ทุก 30 นาที ที่ :04/:34)"
+
+
 def start_scheduler():
-    max_rounds = 1 if CONFIG["DRY_RUN"] else CONFIG["MAX_ROUNDS_PER_JOB"]
-    print(f"🚀 เริ่มบอท Hizeiris Continuous Engine (โหมด: {'GitHub Continuous Shift' if IS_GITHUB_ACTIONS else 'Local'}, จำนวนรอบต่อกะ: {max_rounds} รอบ)...")
+    shift_start = now_th()
+    shift_end = shift_start + timedelta(minutes=175)
+    max_rounds = 1 if CONFIG["DRY_RUN"] else 14
+    print(f"🚀 เริ่มบอท Hizeiris Continuous Engine (โหมด: {'GitHub Continuous Shift' if IS_GITHUB_ACTIONS else 'Local'}, เวลาเริ่มกะ: {shift_start.strftime('%H:%M:%S')} น.)...")
+
     for round_idx in range(1, max_rounds + 1):
         if STOP_REQUESTED:
             break
-        print(f"\n==================== รอบการทำงานที่ {round_idx}/{max_rounds} ({now_th().strftime('%H:%M:%S')}) ====================")
+        cur_now = now_th()
+        print(f"\n==================== รอบการทำงานที่ {round_idx} ({cur_now.strftime('%H:%M:%S')} น.) ====================")
         try:
             run_once()
         except SystemExit:
             break
         except Exception as e:
             print(f"⚠️ ข้ามข้อผิดพลาดย่อยในรอบที่ {round_idx}: {e}")
-        if round_idx >= max_rounds or CONFIG["DRY_RUN"] or STOP_REQUESTED:
+
+        if CONFIG["DRY_RUN"] or STOP_REQUESTED:
             break
-        now = now_th()
-        # หากเพิ่งรันช่วง 06:00–06:24 น. (ก่อนเว็บ Hizeiris อัปเดตราคาเปิดตอน 06:24–06:30 น.)
-        # ให้ปลุกบอทมาดึงราคาเปิดใหม่อัตโนมัติทันทีที่เวลา 06:28 น.!
-        if now.hour == 6 and now.minute < 26:
-            target_sec = (28 - now.minute) * 60 - now.second
-            sleep_sec = max(target_sec, 120)
-            print(f"⏰ ช่วงเปิดตลาดเช้า: รอซิงค์ราคาเปิด 06:30 น. จากเว็บ Hizeiris อีกครั้งใน {sleep_sec // 60} นาที {sleep_sec % 60} วินาที...")
-        else:
-            # ตื่นที่นาที :04 และ :34 ของทุกชั่วโมง (หลังข้อมูลรอบ :00 เข้าเว็บตอน :02.1 และรอบ :30 เข้าเว็บตอน :32.1 เสร็จแล้ว 100%)
-            sec_since_target = ((now.minute - 4) % 30) * 60 + now.second
-            sleep_sec = max(1800 - sec_since_target, 300)
-            print(f"⏳ รอส่งรายงานรอบถัดไป (ตรงจังหวะหลังเว็บอัปเดตรอบ :04/:34) ในอีก {sleep_sec // 60} นาที {sleep_sec % 60} วินาที...")
+
+        after_now = now_th()
+        sleep_sec, mode_label = _compute_next_sleep_seconds(after_now)
+        next_wake = after_now + timedelta(seconds=sleep_sec)
+
+        # จบกะก่อนเวลาเริ่มกะ 3 ชั่วโมงถัดไป (เพื่อส่งไม้ต่อให้ Cron รอบถัดไปโดยไม่ซ้อนทับ)
+        if next_wake >= shift_end:
+            print(f"🏁 ใกล้ถึงเวลากะถัดไป ({next_wake.strftime('%H:%M')} น.) — จบกะการทำงานนี้เพื่อส่งต่อให้กะถัดไปอย่างสมบูรณ์")
+            break
+
+        print(f"⏳ [{mode_label}] รอส่งรายงานรอบถัดไปเวลา {next_wake.strftime('%H:%M:%S')} น. (อีก {sleep_sec // 60} นาที {sleep_sec % 60} วินาที)...")
         for _ in range(sleep_sec):
             if STOP_REQUESTED:
                 break
