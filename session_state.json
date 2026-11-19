@@ -1,6 +1,10 @@
 {
   "trading_day": "2026-11-20",
+<<<<<<< Updated upstream
   "timestamp": "2026-11-20 03:34",
+=======
+  "timestamp": "2026-11-20 03:35",
+>>>>>>> Stashed changes
   "round_str": "รอบ 75/75 เวลา 03:30 (เข้า 03:32)",
   "daily_open_fut": 3732.7,
   "daily_open_spot": 3730.2,
@@ -13,8 +17,13 @@
   "sell_2sd": 3839.91,
   "buy_3sd": 3565.64,
   "sell_3sd": 3894.76,
+<<<<<<< Updated upstream
   "futures_price": 3671.78,
   "spot_price": 3669.28,
+=======
+  "futures_price": 3671.59,
+  "spot_price": 3669.09,
+>>>>>>> Stashed changes
   "diff": 2.5,
   "atm_iv": 33.17,
   "vol_settle_atm": 34.93,
@@ -52,13 +61,21 @@
     },
     "BUY_1SD": {
       "status": "PASSED",
+<<<<<<< Updated upstream
       "time": "02:34",
+=======
+      "time": "03:36",
+>>>>>>> Stashed changes
       "price": "3,662.08",
       "zone_px": "3,675.35"
     },
     "PUT_WALL": {
       "status": "PASSED",
+<<<<<<< Updated upstream
       "time": "02:34",
+=======
+      "time": "03:36",
+>>>>>>> Stashed changes
       "price": "3,662.08",
       "zone_px": "3,697.50"
     }
@@ -85,6 +102,7 @@
       "call_wall": 60.0
     },
     {
+<<<<<<< Updated upstream
       "time": "02:04",
       "round_str": "รอบ 201/201 เวลา 02:00 (เข้า 02:03)",
       "dte": 0.02,
@@ -146,13 +164,22 @@
     },
     {
       "time": "03:34",
+=======
+      "time": "03:36",
+>>>>>>> Stashed changes
       "round_str": "รอบ 75/75 เวลา 03:30 (เข้า 03:32)",
       "dte": 0.92,
       "live_1sd": 61.2,
       "skew_bias": "PUT_SKEW",
+<<<<<<< Updated upstream
       "fut": 3671.78,
       "spot": 3669.28,
       "delta_from_open": "-60.92",
+=======
+      "fut": 3671.59,
+      "spot": 3669.09,
+      "delta_from_open": "-61.11",
+>>>>>>> Stashed changes
       "z_sd": "-1.11SD",
       "atm_iv": 33.17,
       "vol_chg": -1.76,
