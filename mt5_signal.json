@@ -1,78 +1,59 @@
 {
   "trading_day": "2026-11-20",
-<<<<<<< Updated upstream
-  "updated_th": "2026-11-20 06:29",
-=======
-  "updated_th": "2026-11-20 06:35",
->>>>>>> Stashed changes
+  "updated_th": "2026-11-20 07:04",
   "contract": "OG3X6",
-  "round_str": "รอบ 80/80 เวลา 04:45 (เข้า 04:47)",
-  "dte": 0.86,
+  "round_str": "รอบ 83/83 เวลา 07:00 (เข้า 07:02)",
+  "dte": 0.77,
   "dte_lock": false,
-  "open_spot": 3855.2,
-<<<<<<< Updated upstream
-  "spot_now": 3625.59,
-=======
-  "spot_now": 3623.41,
->>>>>>> Stashed changes
-  "put_wall": 3747.5,
-  "call_wall": 3687.5,
-  "max_pain": 3777.5,
+  "open_spot": 3633.8,
+  "spot_now": 3611.22,
+  "put_wall": 3622.5,
+  "call_wall": 3747.5,
+  "max_pain": 3767.5,
   "zones": [
     {
       "id": "BUY_1SD",
       "side": "BUY",
-      "entry": 3798.51,
-      "tp1": 3806.51,
-      "tp2": 3810.51,
-      "sl_normal": 3790.51,
-      "sl_rec1": 3786.01,
-      "rec1_tp": 3773.51,
-      "status": "PASSED"
+      "entry": 3576.47,
+      "tp1": 3584.47,
+      "tp2": 3588.47,
+      "sl_normal": 3568.47,
+      "sl_rec1": 3563.97,
+      "rec1_tp": 3551.47,
+      "status": "FRESH"
     },
     {
       "id": "BUY_2SD",
       "side": "BUY",
-      "entry": 3741.82,
-      "tp1": 3756.82,
-      "tp2": 3766.82,
-      "sl_normal": 3733.82,
-      "sl_rec1": 3729.32,
-      "rec1_tp": 3716.82,
-      "status": "PASSED"
+      "entry": 3519.14,
+      "tp1": 3534.14,
+      "tp2": 3544.14,
+      "sl_normal": 3511.14,
+      "sl_rec1": 3506.64,
+      "rec1_tp": 3494.14,
+      "status": "FRESH"
     },
     {
       "id": "SELL_1SD",
       "side": "SELL",
-      "entry": 3911.89,
-      "tp1": 3903.89,
-      "tp2": 3899.89,
-      "sl_normal": 3919.89,
-      "sl_rec1": 3924.39,
-      "rec1_tp": 3936.89,
+      "entry": 3691.13,
+      "tp1": 3683.13,
+      "tp2": 3679.13,
+      "sl_normal": 3699.13,
+      "sl_rec1": 3703.63,
+      "rec1_tp": 3716.13,
       "status": "FRESH"
     },
     {
       "id": "SELL_2SD",
       "side": "SELL",
-      "entry": 3968.58,
-      "tp1": 3953.58,
-      "tp2": 3943.58,
-      "sl_normal": 3976.58,
-      "sl_rec1": 3981.08,
-      "rec1_tp": 3993.58,
+      "entry": 3748.46,
+      "tp1": 3733.46,
+      "tp2": 3723.46,
+      "sl_normal": 3756.46,
+      "sl_rec1": 3760.96,
+      "rec1_tp": 3773.46,
       "status": "FRESH"
-    },
-    {
-      "id": "CALL_WALL",
-      "side": "SELL",
-      "entry": 3687.5,
-      "tp1": 3677.5,
-      "tp2": 3662.5,
-      "sl_normal": 3695.5,
-      "sl_rec1": 3700.0,
-      "rec1_tp": 3712.5,
-      "status": "PASSED"
     }
   ]
 }
