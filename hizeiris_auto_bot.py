@@ -1615,9 +1615,13 @@ def fetch_telegram_commands(token: str, chat_id: str) -> Tuple[Optional[float], 
                 for upd in reversed(resp.json().get("result", [])):
                     msg = upd.get("message", {})
                     if str(msg.get("chat", {}).get("id", "")) == str(chat_id):
+                        # รับคำสั่ง /diff หรือ /open เฉพาะที่ส่งภายใน 6 ชั่วโมงล่าสุดเท่านั้น (ป้องกันคำสั่งวันเก่าค้างทับค่าจริงวันนี้)
+                        msg_ts = int(msg.get("date", 0))
+                        if msg_ts > 0 and (time.time() - msg_ts) > 6 * 3600:
+                            continue
                         txt = msg.get("text", "").strip()
                         if tg_diff is None:
-                            m = re.match(r"^/?diff\s+([0-9]+(?:\.[0-9]+)?)$", txt, re.IGNORECASE)
+                            m = re.match(r"^/?diff\s+([+\-]?[0-9]+(?:\.[0-9]+)?)$", txt, re.IGNORECASE)
                             if m:
                                 tg_diff = float(m.group(1))
                         if tg_open is None:
@@ -2395,21 +2399,48 @@ def parse_snapshot_from_dom_text(
         formula_open_fut = float(formula_m.group(1).replace(",", ""))
         open_iv = float(formula_m.group(2))
 
-    # 3. ดึงค่า diff จากแท็บ SD · diff
-    raw_mkt_diff = _parse_float(r"diff\s*ตลาดจริง\s*([0-9]+\.[0-9]+)", diff_scope, 0.0)
-    rounded_diff = _parse_float(r"ปัด\s*([0-9]+\.?[0-9]*)", diff_scope, 0.0)
-    if rounded_diff == 0.0:
-        rounded_diff = _parse_float(r"\bdiff\s+([0-9]+\.[0-9]+)\s+ราคา\s*spot", diff_scope, 0.0)
-    if rounded_diff == 0.0:
-        rounded_diff = _parse_float(r"\bdiff\s*[:=]?\s*([0-9]+\.?[0-9]*)", diff_scope, 0.0)
+    # 3. ดึงค่า diff แบบ Real-Time 100% จากแท็บ SD · diff (รองรับทั้งค่าบวก, 0.00, ค่าติดลบ, และ > 50)
+    def _parse_signed_opt(pattern: str, text_src: str) -> Optional[float]:
+        m = re.search(pattern, text_src, re.IGNORECASE)
+        if m:
+            try:
+                return float(m.group(1).replace(",", ""))
+            except Exception:
+                pass
+        return None
+
+    raw_mkt_diff_opt = _parse_signed_opt(r"diff\s*ตลาดจริง\s*([+\-]?[0-9]+(?:\.[0-9]+)?)", diff_scope)
+    raw_mkt_diff = raw_mkt_diff_opt if raw_mkt_diff_opt is not None else 0.0
+
+    # ลำดับความแม่นยำสูงสุด:
+    # 3A. อ่านจากบรรทัดในตาราง SD·diff โดยตรง: "diff  X.XX  ราคา spot  3,XXX.XX"
+    table_row_diff = _parse_signed_opt(r"\bdiff\s+([+\-]?[0-9]+\.[0-9]+)\s+ราคา\s*spot", diff_scope)
+    # 3B. คำนวณย้อนกลับตรงจากตาราง: ราคาเปิด - ราคา spot (ตรงกับหน้าเว็บ 100.00% ไม่มีวันพลาด)
+    tbl_open_px = _parse_signed_opt(r"ราคาเปิด\s+([2-5],?[0-9]{3}\.[0-9]+)", diff_scope)
+    tbl_spot_px = _parse_signed_opt(r"ราคา\s*spot\s+([2-5],?[0-9]{3}\.[0-9]+)", diff_scope)
+    calc_table_diff = round(tbl_open_px - tbl_spot_px, 2) if (tbl_open_px and tbl_spot_px and abs(tbl_open_px - tbl_spot_px) <= 200.0) else None
+    # 3C. อ่านจากข้อความ "diff ตลาดจริง X -> ปัด Y"
+    rounded_diff_opt = _parse_signed_opt(r"ปัด\s*([+\-]?[0-9]+(?:\.[0-9]+)?)", diff_scope)
+    # 3D. อ่านจากช่อง <input> diff ในแท็บ SD·diff
+    input_diff_opt = _parse_signed_opt(r'"text"\s*:\s*"[^"]*\bdiff\b[^"]*"[^}]*?"value"\s*:\s*"([+\-]?[0-9]+(?:\.[0-9]+)?)"', diff_scope)
+    if input_diff_opt is None:
+        input_diff_opt = _parse_signed_opt(r'"value"\s*:\s*"([+\-]?[0-9]+(?:\.[0-9]+)?)"[^}]*?"text"\s*:\s*"[^"]*\bdiff\b', diff_scope)
+    # 3E. อ่านจากแท็บ แผนเทรด 8 ขั้น ("1. ตั้ง diff ... diff X.X")
+    plan_diff_opt = _parse_signed_opt(r"ตั้ง\s*diff[^\n]*\n\s*diff\s+([+\-]?[0-9]+(?:\.[0-9]+)?)", raw_text)
+
+    detected_web_diff = None
+    for cand in [calc_table_diff, table_row_diff, rounded_diff_opt, input_diff_opt, plan_diff_opt]:
+        if cand is not None and -200.0 <= cand <= 200.0:
+            detected_web_diff = round(cand, 2)
+            break
 
     if tg_diff is not None:
-        final_diff, diff_src = round(tg_diff, 2), "ตั้งค่าจาก Telegram /diff"
-    elif 0.1 <= rounded_diff <= 50.0:
-        final_diff = round(rounded_diff, 2)
-        diff_src = f"แท็บ SD·diff (ตลาดจริง {raw_mkt_diff:.2f} -> ปัด {final_diff:.2f})" if raw_mkt_diff > 0 else "อ่านจากแท็บ SD·diff บนเว็บ"
+        final_diff, diff_src = round(tg_diff, 2), "ตั้งค่าจาก Telegram /diff (ภายใน 6 ชม.)"
+    elif detected_web_diff is not None:
+        final_diff = detected_web_diff
+        diff_src = f"ตาราง SD·diff หน้าเว็บจริง (ตลาดจริง {raw_mkt_diff:.2f} -> ใช้ {final_diff:.2f})" if raw_mkt_diff_opt is not None else f"ตาราง SD·diff หน้าเว็บจริง ({final_diff:.2f})"
     else:
-        final_diff, diff_src = fallback_diff, f"ค่ามาตรฐาน ({fallback_diff})"
+        final_diff, diff_src = fallback_diff, f"ค่าสำรอง ({fallback_diff})"
 
     # 4. ดึงราคาเปิด Futures และ Spot จากตาราง SD · diff โดยตรง (เรียงลำดับความแม่นยำสูงสุด)
     sd_diff_open_fut = _parse_float(r"ราคาเปิด\s*([2-5],?[0-9]{3}(?:\.[0-9]+)?)", diff_scope, 0.0)
@@ -4231,7 +4262,7 @@ def run_once():
         print(
             f"✅ ดึงตาราง SD·diff & รอบปัจจุบันตรงกับหน้าเว็บสำเร็จ: {snap.contract_name} ({snap.round_str}) | "
             f"OpenFut {snap.daily_open_fut:.2f} (OpenSpot {snap.daily_open_spot:.2f}) | OpenIV {snap.open_iv:.2f}% | "
-            f"RoundFut {snap.futures_price:.1f} | Diff {snap.diff:.2f}"
+            f"RoundFut {snap.futures_price:.1f} | Diff {snap.diff:.2f} ({snap.diff_source})"
         )
 
     ref_spot_est = round((snap.latest_gc_fut or snap.futures_price) - snap.diff, 2)
