@@ -1,15 +1,15 @@
 {
-  "trading_day": "2026-11-20",
-  "updated_th": "2026-11-20 23:35",
+  "trading_day": "2026-11-21",
+  "updated_th": "2026-11-21 00:05",
   "contract": "OG3X6",
-  "round_str": "รอบ 182/182 เวลา 23:30 (เข้า 23:31)",
-  "dte": 0.08,
+  "round_str": "รอบ 188/188 เวลา 00:00 (เข้า 00:01)",
+  "dte": 0.06,
   "dte_lock": false,
   "open_spot": 3633.8,
-  "spot_now": 3545.16,
+  "spot_now": 3536.9,
   "put_wall": 3600.0,
-  "call_wall": 3610.0,
-  "max_pain": 3620.0,
+  "call_wall": 3600.0,
+  "max_pain": 3605.0,
   "zones": [
     {
       "id": "BUY_1SD",
@@ -58,12 +58,12 @@
     {
       "id": "CALL_WALL",
       "side": "SELL",
-      "entry": 3610.0,
-      "tp1": 3600.0,
-      "tp2": 3585.0,
-      "sl_normal": 3618.0,
-      "sl_rec1": 3622.5,
-      "rec1_tp": 3635.0,
+      "entry": 3600.0,
+      "tp1": 3590.0,
+      "tp2": 3575.0,
+      "sl_normal": 3608.0,
+      "sl_rec1": 3612.5,
+      "rec1_tp": 3625.0,
       "status": "PASSED"
     }
   ]
