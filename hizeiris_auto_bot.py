@@ -4367,6 +4367,23 @@ def run_once():
     print("🎉 ส่งรูปกราฟ 4 ภาพ และรายงานที่ล็อกราคาเปิดตรงกับหน้าเว็บ Hizeiris 100% เข้า Telegram เสร็จสมบูรณ์!")
 
 
+def is_weekend_market_closed(dt: datetime) -> bool:
+    """
+    หยุดการทำงานวันเสาร์–อาทิตย์ และกลับมาเริ่มทำงานอัตโนมัติเวลา 06:00 น. วันจันทร์ (เวลาไทย UTC+7):
+    - วันเสาร์ (weekday == 5): ปิดระบบตั้งแต่เวลา 05:00 น. เป็นต้นไป (หลังจบตลาดคืนวันศุกร์ 04:45 น.)
+    - วันอาทิตย์ (weekday == 6): ปิดระบบตลอดทั้งวัน
+    - วันจันทร์ (weekday == 0): ปิดระบบก่อนเวลา 06:00 น. และเริ่มเปิดทำงานทันทีตั้งแต่ 06:00 น. เป็นต้นไป
+    """
+    wd = dt.weekday()  # 0=จันทร์ ... 4=ศุกร์, 5=เสาร์, 6=อาทิตย์
+    if wd == 5 and dt.hour >= 5:
+        return True
+    if wd == 6:
+        return True
+    if wd == 0 and dt.hour < 6:
+        return True
+    return False
+
+
 def _compute_next_sleep_seconds(now: datetime) -> Tuple[int, str]:
     """
     คำนวณเวลานอนรอถึงรอบถัดไป (อิงเวลาไทย UTC+7):
@@ -4396,6 +4413,11 @@ def _compute_next_sleep_seconds(now: datetime) -> Tuple[int, str]:
 
 def start_scheduler():
     shift_start = now_th()
+    force_weekend = os.getenv("FORCE_WEEKEND_RUN", "").lower() == "true"
+    if not CONFIG["DRY_RUN"] and not force_weekend and is_weekend_market_closed(shift_start):
+        print(f"🛌 ตลาดปิดวันเสาร์–อาทิตย์ ({shift_start.strftime('%A %Y-%m-%d %H:%M')} น. เวลาไทย) — บอทพักการทำงานอัตโนมัติ และจะกลับมาเริ่มใหม่วันจันทร์เวลา 06:00 น.")
+        return
+
     shift_end = shift_start + timedelta(minutes=175)
     max_rounds = 1 if CONFIG["DRY_RUN"] else 14
     print(f"🚀 เริ่มบอท Hizeiris Continuous Engine (โหมด: {'GitHub Continuous Shift' if IS_GITHUB_ACTIONS else 'Local'}, เวลาเริ่มกะ: {shift_start.strftime('%H:%M:%S')} น.)...")
@@ -4404,6 +4426,9 @@ def start_scheduler():
         if STOP_REQUESTED:
             break
         cur_now = now_th()
+        if not CONFIG["DRY_RUN"] and not force_weekend and is_weekend_market_closed(cur_now):
+            print(f"🛌 เข้าสู่ช่วงปิดตลาดเสาร์–อาทิตย์ ({cur_now.strftime('%H:%M')} น.) — หยุดส่งรายงานและพักระบบจนถึงวันจันทร์ 06:00 น.")
+            break
         print(f"\n==================== รอบการทำงานที่ {round_idx} ({cur_now.strftime('%H:%M:%S')} น.) ====================")
         try:
             run_once()
@@ -4420,6 +4445,9 @@ def start_scheduler():
         next_wake = after_now + timedelta(seconds=sleep_sec)
 
         # จบกะก่อนเวลาเริ่มกะ 3 ชั่วโมงถัดไป (เพื่อส่งไม้ต่อให้ Cron รอบถัดไปโดยไม่ซ้อนทับ)
+        if not force_weekend and is_weekend_market_closed(next_wake):
+            print(f"🛌 รอบถัดไป ({next_wake.strftime('%A %H:%M')} น.) อยู่ในช่วงปิดตลาดเสาร์–อาทิตย์ — จบกะการทำงานนี้ทันที (กลับมาเริ่มวันจันทร์ 06:00 น.)")
+            break
         if next_wake >= shift_end:
             print(f"🏁 ใกล้ถึงเวลากะถัดไป ({next_wake.strftime('%H:%M')} น.) — จบกะการทำงานนี้เพื่อส่งต่อให้กะถัดไปอย่างสมบูรณ์")
             break
