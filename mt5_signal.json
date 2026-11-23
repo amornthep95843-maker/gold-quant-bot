@@ -1,12 +1,20 @@
 {
   "trading_day": "2026-11-24",
+<<<<<<< Updated upstream
   "updated_th": "2026-11-24 04:04",
+=======
+  "updated_th": "2026-11-24 04:06",
+>>>>>>> Stashed changes
   "contract": "OGZ6",
   "round_str": "รอบ 75/75 เวลา 04:00 (เข้า 04:02)",
   "dte": 0.9,
   "dte_lock": false,
   "open_spot": 3570.5,
+<<<<<<< Updated upstream
   "spot_now": 3636.08,
+=======
+  "spot_now": 3635.03,
+>>>>>>> Stashed changes
   "put_wall": 3500.0,
   "call_wall": 3700.0,
   "max_pain": 3750.0,
