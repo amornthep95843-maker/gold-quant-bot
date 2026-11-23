@@ -1,15 +1,15 @@
 {
   "trading_day": "2026-11-24",
-  "updated_th": "2026-11-24 02:34",
+  "updated_th": "2026-11-24 03:05",
   "contract": "OGZ6",
-  "round_str": "รอบ 69/69 เวลา 02:30 (เข้า 02:33)",
-  "dte": 0.96,
+  "round_str": "รอบ 71/71 เวลา 03:00 (เข้า 03:03)",
+  "dte": 0.94,
   "dte_lock": false,
   "open_spot": 3570.5,
-  "spot_now": 3648.11,
+  "spot_now": 3640.53,
   "put_wall": 3500.0,
   "call_wall": 3700.0,
-  "max_pain": 3795.0,
+  "max_pain": 3790.0,
   "zones": [
     {
       "id": "BUY_1SD",
