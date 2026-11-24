@@ -1,13 +1,13 @@
 {
   "trading_day": "2026-11-24",
-  "updated_th": "2026-11-24 18:35",
+  "updated_th": "2026-11-24 18:54",
   "contract": "OGZ6",
-  "round_str": "รอบ 126/126 เวลา 18:30 (เข้า 18:32)",
-  "dte": 0.29,
+  "round_str": "รอบ 127/127 เวลา 18:45 (เข้า 18:47)",
+  "dte": 0.28,
   "dte_lock": false,
   "open_spot": 3636.4,
-  "spot_now": 3629.48,
-  "put_wall": 3500.0,
+  "spot_now": 3633.39,
+  "put_wall": 3600.0,
   "call_wall": 3700.0,
   "max_pain": 3700.0,
   "zones": [
@@ -54,6 +54,17 @@
       "sl_rec1": 3781.38,
       "rec1_tp": 3793.88,
       "status": "FRESH"
+    },
+    {
+      "id": "PUT_WALL",
+      "side": "BUY",
+      "entry": 3600.0,
+      "tp1": 3610.0,
+      "tp2": 3625.0,
+      "sl_normal": 3592.0,
+      "sl_rec1": 3587.5,
+      "rec1_tp": 3575.0,
+      "status": "PASSED"
     }
   ]
 }
