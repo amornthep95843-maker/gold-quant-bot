@@ -1,7 +1,7 @@
 {
   "trading_day": "2026-11-25",
-  "timestamp": "2026-11-25 01:04",
-  "round_str": "รอบ 194/194 เวลา 01:00 (เข้า 01:01)",
+  "timestamp": "2026-11-25 01:34",
+  "round_str": "รอบ 180/180 เวลา 01:30 (เข้า 01:32)",
   "daily_open_fut": 3636.4,
   "daily_open_spot": 3636.4,
   "open_iv": 38.91,
@@ -11,18 +11,18 @@
   "sell_1sd": 3702.64,
   "buy_2sd": 3503.92,
   "sell_2sd": 3768.88,
-  "buy_3sd": 3437.67,
-  "sell_3sd": 3835.13,
-  "futures_price": 3564.41,
-  "spot_price": 3564.41,
+  "buy_3sd": 3437.68,
+  "sell_3sd": 3835.12,
+  "futures_price": 3563.36,
+  "spot_price": 3563.36,
   "diff": 0.0,
-  "atm_iv": 28.42,
-  "vol_settle_atm": 50.39,
-  "intraday_c": 572,
-  "intraday_p": 2301,
-  "put_wall": 3550.0,
-  "call_wall": 3620.0,
-  "max_pain": 3565.0,
+  "atm_iv": 44.65,
+  "vol_settle_atm": 53.79,
+  "intraday_c": 1978,
+  "intraday_p": 878,
+  "put_wall": -20.0,
+  "call_wall": 60.0,
+  "max_pain": 0.0,
   "session_high": 3678.49,
   "session_low": 3558.91,
   "touched_zones": {
@@ -36,13 +36,13 @@
       "status": "PASSED",
       "time": "00:06",
       "price": "3,558.91",
-      "zone_px": "3,550.00"
+      "zone_px": "-20.00"
     },
     "CALL_WALL": {
       "status": "PASSED",
       "time": "00:06",
       "price": "3,678.49",
-      "zone_px": "3,620.00"
+      "zone_px": "60.00"
     }
   },
   "round_history": [
@@ -125,6 +125,26 @@
       "oi_p": 1594,
       "put_wall": 3550.0,
       "call_wall": 3620.0
+    },
+    {
+      "time": "01:35",
+      "round_str": "รอบ 180/180 เวลา 01:30 (เข้า 01:32)",
+      "dte": 0.04,
+      "live_1sd": 0.0,
+      "skew_bias": "CALL_SKEW",
+      "fut": 3563.36,
+      "spot": 3563.36,
+      "delta_from_open": "-73.04",
+      "z_sd": "-1.10SD",
+      "atm_iv": 44.65,
+      "vol_chg": -9.14,
+      "intra_c": 1978,
+      "intra_p": 878,
+      "intra_pc": 0.44,
+      "oi_c": 490,
+      "oi_p": 175,
+      "put_wall": -20.0,
+      "call_wall": 60.0
     }
   ]
 }
