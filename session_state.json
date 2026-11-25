@@ -1,7 +1,7 @@
 {
-  "trading_day": "2026-11-25",
+  "trading_day": "2026-11-26",
   "contract_name": "OG4X6",
-  "timestamp": "2026-11-26 05:57",
+  "timestamp": "2026-11-26 06:04",
   "round_str": "รอบ 80/80",
   "daily_open_fut": 3586.9,
   "daily_open_spot": 3559.4,
@@ -29,7 +29,7 @@
   "touched_zones": {
     "CALL_WALL": {
       "status": "PASSED",
-      "time": "05:57",
+      "time": "06:04",
       "price": "3,589.43",
       "zone_px": "3,572.50"
     }
@@ -37,7 +37,7 @@
   "eod_scorecard_sent_contract": "",
   "round_history": [
     {
-      "time": "05:57",
+      "time": "06:04",
       "round_str": "รอบ 80/80",
       "dte": 1.86,
       "live_1sd": 100.5,
