@@ -1,12 +1,12 @@
 {
   "trading_day": "2026-11-25",
-  "updated_th": "2026-11-26 03:37",
+  "updated_th": "2026-11-26 04:08",
   "contract": "OG4X6",
-  "round_str": "รอบ 75/75",
-  "dte": 1.92,
+  "round_str": "รอบ 77/77",
+  "dte": 1.89,
   "dte_lock": false,
   "open_spot": 3559.4,
-  "spot_now": 3570.12,
+  "spot_now": 3576.43,
   "put_wall": 3472.5,
   "call_wall": 3572.5,
   "max_pain": 3622.5,
@@ -65,17 +65,6 @@
       "sl_rec1": 3460.0,
       "rec1_tp": 3447.5,
       "status": "PASSED"
-    },
-    {
-      "id": "CALL_WALL",
-      "side": "SELL",
-      "entry": 3572.5,
-      "tp1": 3562.5,
-      "tp2": 3547.5,
-      "sl_normal": 3580.5,
-      "sl_rec1": 3585.0,
-      "rec1_tp": 3597.5,
-      "status": "TOUCHED"
     }
   ]
 }
