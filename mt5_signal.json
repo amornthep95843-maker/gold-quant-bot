@@ -1,15 +1,15 @@
 {
   "trading_day": "2026-11-25",
-  "updated_th": "2026-11-25 13:05",
+  "updated_th": "2026-11-25 13:34",
   "contract": "G4WX6",
-  "round_str": "รอบ 108/108 เวลา 13:00 (เข้า 13:02)",
-  "dte": 0.52,
+  "round_str": "รอบ 110/110 เวลา 13:30 (เข้า 13:32)",
+  "dte": 0.5,
   "dte_lock": false,
   "open_spot": 3559.4,
-  "spot_now": 3520.57,
-  "put_wall": 3522.5,
-  "call_wall": 3652.5,
-  "max_pain": 3632.5,
+  "spot_now": 3520.85,
+  "put_wall": 3497.5,
+  "call_wall": 3672.5,
+  "max_pain": 3597.5,
   "zones": [
     {
       "id": "BUY_1SD",
@@ -56,25 +56,14 @@
       "status": "FRESH"
     },
     {
-      "id": "PUT_WALL",
-      "side": "BUY",
-      "entry": 3522.5,
-      "tp1": 3532.5,
-      "tp2": 3547.5,
-      "sl_normal": 3514.5,
-      "sl_rec1": 3510.0,
-      "rec1_tp": 3497.5,
-      "status": "PASSED"
-    },
-    {
       "id": "CALL_WALL",
       "side": "SELL",
-      "entry": 3652.5,
-      "tp1": 3642.5,
-      "tp2": 3627.5,
-      "sl_normal": 3660.5,
-      "sl_rec1": 3665.0,
-      "rec1_tp": 3677.5,
+      "entry": 3672.5,
+      "tp1": 3662.5,
+      "tp2": 3647.5,
+      "sl_normal": 3680.5,
+      "sl_rec1": 3685.0,
+      "rec1_tp": 3697.5,
       "status": "PASSED"
     }
   ]
