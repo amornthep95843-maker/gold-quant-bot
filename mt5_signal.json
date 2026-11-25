@@ -1,10 +1,6 @@
 {
   "trading_day": "2026-11-25",
-<<<<<<< Updated upstream
-  "updated_th": "2026-11-26 05:34",
-=======
-  "updated_th": "2026-11-26 05:36",
->>>>>>> Stashed changes
+  "updated_th": "2026-11-26 05:58",
   "contract": "OG4X6",
   "round_str": "รอบ 80/80",
   "dte": 1.86,
@@ -24,7 +20,7 @@
       "sl_normal": 3498.0,
       "sl_rec1": 3493.5,
       "rec1_tp": 3481.0,
-      "status": "PASSED"
+      "status": "FRESH"
     },
     {
       "id": "BUY_2SD",
@@ -35,7 +31,7 @@
       "sl_normal": 3444.6,
       "sl_rec1": 3440.1,
       "rec1_tp": 3427.6,
-      "status": "PASSED"
+      "status": "FRESH"
     },
     {
       "id": "SELL_1SD",
@@ -68,7 +64,7 @@
       "sl_normal": 3464.5,
       "sl_rec1": 3460.0,
       "rec1_tp": 3447.5,
-      "status": "PASSED"
+      "status": "FRESH"
     }
   ]
 }

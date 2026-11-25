@@ -3830,12 +3830,155 @@ def _evaluate_first_touch_status(
     return status_out
 
 
+
+def _evaluate_research_signals(
+    snap: HizeirisSnapshot,
+    exact_calc: Dict,
+    prev_state: Optional[Dict],
+) -> Dict[str, str]:
+    """
+    ชุดสัญญาณเชิงปริมาณขั้นสูงจากงานวิจัยใน Drive ทั้ง 4 ตัว:
+    1) Vanna Trigger (IV Peak & Turn Down ในโซน ±1.5SD ถึง ±3SD)
+    2) Wall & Max Pain Migration Alert (ตรวจการย้ายกำแพงสถาบันระหว่างรอบ)
+    3) Session Mode (เอเชีย 82% ที่ 1SD vs นิวยอร์ก 40% ไหลไป 2SD)
+    4) Negative Gamma Squeeze 4-Phase Detector (Amaya et al., 2025)
+    """
+    cur_dt = now_th()
+    z_sd = float(exact_calc["current_sd_zone"].get("sd_ratio", 0.0))
+    az = abs(z_sd)
+    same_contract = bool(
+        prev_state
+        and prev_state.get("contract_name") == snap.contract_name
+        and prev_state.get("trading_day") == get_cme_trading_day(cur_dt)
+    )
+
+    # 1) IV Peak & Turn Down (Vanna Trigger)
+    vanna_trigger = ""
+    if same_contract and prev_state and prev_state.get("atm_iv"):
+        prev_iv = float(prev_state.get("atm_iv", snap.atm_iv))
+        d_iv = round(snap.atm_iv - prev_iv, 2)
+        if az >= 1.35 and d_iv <= -0.25:
+            vanna_trigger = (
+                f"🔥 *Vanna Trigger Active!* เส้น IV พีคแล้วหักหัวลง (`{prev_iv:.2f}% -> {snap.atm_iv:.2f}%`, `{d_iv:+.2f}%`) "
+                f"ในโซน `{z_sd:+.2f}SD` -> *เข้าดักสวนได้ตามเงื่อนไขวิจัย (ชนะ 86.8%–95.0%)*"
+            )
+        elif az >= 1.35 and d_iv >= 0.25:
+            vanna_trigger = (
+                f"⏳ *รอ IV หักหัวลง*: Vol สดยังไต่ขึ้น (`{prev_iv:.2f}% -> {snap.atm_iv:.2f}%`, `{d_iv:+.2f}%`) "
+                f"ในโซน `{z_sd:+.2f}SD` — อย่ารีบรับมีด!"
+            )
+
+    # 2) Wall & Max Pain Migration Alert
+    wall_moves = []
+    if same_contract and prev_state:
+        p_pw = float(prev_state.get("put_wall", 0.0))
+        p_cw = float(prev_state.get("call_wall", 0.0))
+        p_mp = float(prev_state.get("max_pain", 0.0))
+        if p_pw > 2000 and abs(snap.put_wall - p_pw) >= 5.0:
+            wall_moves.append(f"Put Wall ย้าย `{int(p_pw)} -> {int(snap.put_wall)}` (`{snap.put_wall - p_pw:+.0f}`)")
+        if p_cw > 2000 and abs(snap.call_wall - p_cw) >= 5.0:
+            wall_moves.append(f"Call Wall ย้าย `{int(p_cw)} -> {int(snap.call_wall)}` (`{snap.call_wall - p_cw:+.0f}`)")
+        if p_mp > 2000 and abs(snap.max_pain - p_mp) >= 5.0:
+            wall_moves.append(f"Max Pain ย้าย `{int(p_mp)} -> {int(snap.max_pain)}` (`{snap.max_pain - p_mp:+.0f}`)")
+
+    wall_migration = (
+        "🚨 *ย้ายกำแพงสถาบัน*: " + " | ".join(wall_moves)
+        if wall_moves
+        else "ฐานกำแพง OI & Max Pain นิ่งไม่ย้ายจุด"
+    )
+
+    # 3) Asia vs London vs NY Session Mode
+    hm = cur_dt.hour * 60 + cur_dt.minute
+    if 6 * 60 + 30 <= hm < 13 * 60 + 30:
+        session_mode = "🌏 *โหมดเอเชีย (06:30–13:30 น.)*: Positive Gamma คุมกรอบแน่น — ด่าน `±1SD` เก็บเด้ง/ย่อสั้นชนะสูง `82.0%`"
+    elif 13 * 60 + 30 <= hm < 19 * 60:
+        session_mode = "🌍 *โหมดลอนดอน (13:30–19:00 น.)*: สภาพคล่องขยายตัว — คุม `±1SD` เก็บสั้น `$8–$12` และตั้งรอไม้เอก `±2SD`"
+    elif 19 * 60 <= hm < 23 * 60 + 30:
+        session_mode = "🗽 *โหมดนิวยอร์กพีค (19:00–23:30 น.)*: โอกาสฉีก `±1SD` ไหลไป `±2SD` สูงถึง `40%` — เน้นไม้เอก `±2SD Kill Zone` เป็นหลัก"
+    else:
+        session_mode = "🌙 *โหมดท้ายตลาด/ข้ามคืน*: ระวังแรงเหวี่ยงก่อนปิดสัญญา `01:30 น.` (งดสวนเมื่อ `DTE < 0.04`)"
+
+    # 4) Negative Gamma Squeeze 4-Phase Detector (Amaya et al., 2025)
+    gamma_phase = ""
+    if snap.vol_chg >= 1.0:
+        if az < 1.0:
+            gamma_phase = f"⚡ *Gamma Squeeze เฟส 1 (50Δ->25Δ)*: Vol พุ่ง `{snap.vol_chg:+.2f}%` ระวังการฉีกกรอบ `±1SD`"
+        elif az < 1.8:
+            gamma_phase = f"🚨 *Gamma Squeeze เฟส 2 (หลุด 25Δ / ±1SD)*: บีบ Dealer (`Vol Chg {snap.vol_chg:+.2f}%`) ห้ามรีบสวน 1SD ให้รอ `15Δ (±2SD)`"
+        elif az < 2.6:
+            gamma_phase = f"🔥 *Gamma Squeeze เฟส 3 (35Δ–45Δ Vanna Spike โซน ±2SD)*: ใกล้จุดพีคความผันผวน เฝ้ารอ IV หักหัวลงเพื่อเข้าสวนคำใหญ่"
+        else:
+            gamma_phase = f"🚨 *Gamma Squeeze เฟส 4 (50Δ+ Final Flush โซน ±3SD)*: ห้ามตั้ง Pending รับมีด! รอแท่งหยุดไหล + Absorption + IV หักหัวลงเท่านั้น"
+
+    return {
+        "vanna_trigger": vanna_trigger,
+        "wall_migration": wall_migration,
+        "wall_moved": "1" if wall_moves else "0",
+        "session_mode": session_mode,
+        "gamma_phase": gamma_phase,
+    }
+
+
+def _build_eod_quant_scorecard(
+    snap: HizeirisSnapshot,
+    exact_calc: Dict,
+    first_touch_map: Dict[str, Dict[str, object]],
+) -> str:
+    """
+    สรุปสถิติปิดวัน (End-of-Day Quant Scorecard) ส่งอัตโนมัติ 1 ครั้งช่วง 01:00–01:29 น. ก่อนสัญญาหมดอายุ 01:30 น.
+    """
+    spot = exact_calc["spot"]
+    open_spot = exact_calc["open_spot"]
+    tb = exact_calc["sd_table_exact"]
+    sess_hi = float(first_touch_map.get("_session_high", spot))
+    sess_lo = float(first_touch_map.get("_session_low", spot))
+    net_move = round(spot - open_spot, 2)
+    z_net = round(net_move / max(tb["range_1sd"], 1.0), 2)
+
+    hit_lines = []
+    win_est = 0
+    total_hits = 0
+    for zkey in ["BUY_1SD", "BUY_2SD", "BUY_3SD", "PUT_WALL", "SELL_1SD", "SELL_2SD", "SELL_3SD", "CALL_WALL"]:
+        info = first_touch_map.get(zkey)
+        if not isinstance(info, dict) or not info.get("is_touched"):
+            continue
+        total_hits += 1
+        zpx = float(info["price"])
+        side = str(info["side"])
+        st = str(info["status"])
+        t_hm = info["touch_info"]["time"] if isinstance(info.get("touch_info"), dict) else ""
+        # ประเมินคร่าวๆ ว่าหลังชนแล้วราคาดีดกลับมาเกิน TP1 (+8 จุด) หรือไม่
+        bounced = (spot >= zpx + 8.0 or sess_hi >= zpx + 8.0) if side == "BUY" else (spot <= zpx - 8.0 or sess_lo <= zpx - 8.0)
+        if st == "TOUCHED" and bounced:
+            win_est += 1
+            res_tag = "✅ เด้งถึงเป้า TP"
+        elif st == "PASSED":
+            res_tag = "🔴 ทะลุโซน (ต้องใช้ SL/แก้พอร์ต 2x)"
+        else:
+            res_tag = "🟡 แตะแล้วกำลังแกว่ง"
+        hit_lines.append(f"   • {info['label']} (`{zpx:,.2f}`, เวลา {t_hm} น.) -> {res_tag}")
+
+    hits_block = "\n".join(hit_lines) if hit_lines else "   • วันนี้ราคาแกว่งอยู่ในกรอบ `< ±1SD` ไม่แตะด่านใดเลย (ตรงกับสถิติ 500 วัน = 30% ของวัน)"
+    rate_str = f"`{win_est}/{total_hits}` ด่าน" if total_hits > 0 else "ไม่มีด่านถูกทดสอบ"
+
+    return (
+        f"📋 *สรุปสถิติปิดวัน (End-of-Day Quant Scorecard — ก่อนปิดสัญญา {snap.contract_name} 01:30 น.)*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• *ราคาเปิดเช้า -> ปิดรอบ*: `{open_spot:,.2f}` -> `{spot:,.2f}` (สุทธิ `{net_move:+.2f}` จุด = `{z_net:+.2f}SD`)\n"
+        f"• *กรอบวิ่งจริงวันนี้ (High / Low)*: `{sess_hi:,.2f}` / `{sess_lo:,.2f}` (กว้าง `{sess_hi - sess_lo:.2f}` จุด)\n"
+        f"• *ด่านที่ถูกทดสอบวันนี้ ({rate_str})*:\n"
+        f"{hits_block}\n"
+        f"• _เตรียมรีเซ็ตสถานะ First Touch 100% สำหรับซีรีส์วันถัดไปหลัง 01:30 น._"
+    )
+
+
 def build_clean_section_messages(
     snap: HizeirisSnapshot,
     exact_calc: Dict,
     round_history: List[Dict],
     ai_audit_text: str = "",
     first_touch_map: Optional[Dict[str, Dict[str, object]]] = None,
+    prev_state: Optional[Dict] = None,
 ) -> List[str]:
     """
     ฉบับกระชับ อ่านง่าย ไม่รกแชต (ลดจาก 14 ข้อความ เหลือเพียง 3 ข้อความหลักเท่านั้น!):
@@ -3852,6 +3995,7 @@ def build_clean_section_messages(
     spot = exact_calc["spot"]
     open_spot = exact_calc["open_spot"]
     ft = first_touch_map or {}
+    r_sig = _evaluate_research_signals(snap, exact_calc, prev_state)
 
     def _get_ft_badge(ticket: Dict[str, object]) -> Tuple[str, str]:
         st = str(ticket.get("short_title", ""))
@@ -3917,6 +4061,8 @@ def build_clean_section_messages(
         f"⚡ *สรุปหน้างาน & โพยจุดเข้า ({snap.contract_name} | {snap.round_str})*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{dte_lock_banner}"
+        f"{r_sig['session_mode']}\n"
+        f"{(r_sig['vanna_trigger'] + chr(10)) if r_sig['vanna_trigger'] else ''}"
         f"🥇 *Spot ปัจจุบัน*: *`{spot:,.2f}`* _(เปิดเช้า `{open_spot:,.2f}` | สูง/ต่ำวันนี้ `{sess_hi:,.2f} / {sess_lo:,.2f}` | `{mvc['z_from_open']}`)_\n"
         f"📐 *กรอบเช้า (DTE 0.8)*: `1SD ±{tb['range_1sd']:.2f}` (`{tb['buy_1sd']:,.2f} / {tb['sell_1sd']:,.2f}`) | `2SD ±{tb['range_2sd']:.2f}` (`{tb['buy_2sd']:,.2f} / {tb['sell_2sd']:,.2f}`)\n"
         f"🧱 *กำแพง OI*: Put Wall `{ws['put_wall_spot']:,.2f}` | Max Pain `{ws['max_pain_spot']:,.2f}` | Call Wall `{ws['call_wall_spot']:,.2f}`\n"
@@ -3936,7 +4082,7 @@ def build_clean_section_messages(
             touched_summary_list.append(f"{st_lbl} {info['label']} ({info['touch_info']['time']} น.)")
     touched_str = ", ".join(touched_summary_list) if touched_summary_list else "ยังไม่มีโซนใดถูกแตะ (ทุกด่านสดใหม่ First Touch 100%)"
 
-    vol_exp_m2_line = f"   • 🚨 *Vol Expansion (`Vol Chg {snap.vol_chg:+.2f}%`)*: ความผันผวนพุ่งเหนือฐาน ระวัง Negative Gamma Squeeze!\n\n" if snap.vol_chg >= 1.0 else "\n"
+    vol_exp_m2_line = f"   • {r_sig['gamma_phase']}\n\n" if r_sig['gamma_phase'] else "\n"
 
     msg_2 = (
         f"📊 *วิเคราะห์เชิงปริมาณ: เทียบกรอบเช้า (0.8) vs รอบนี้ (`DTE {snap.dte:.2f}`)*\n"
@@ -3947,6 +4093,7 @@ def build_clean_section_messages(
         f"2️⃣ *โฟลว์ Put / Call & โครงสร้างตลาด*:\n"
         f"   • Intraday `C {snap.intraday_c:,} / P {snap.intraday_p:,}` (`P/C {snap.intraday_pc:.2f}`) | OI `C {snap.oi_c:,} / P {snap.oi_p:,}` (`P/C {snap.oi_pc:.2f}`) | Churn `{snap.churn_str}`\n"
         f"   • สถานะ: {m4['quadrant']}\n"
+        f"   • การย้ายกำแพง: {r_sig['wall_migration']}\n"
         f"   • {mvc['vs_prev_text'].replace(chr(10), ' | ')}\n\n"
         f"3️⃣ *การเอียงของเส้น IV (Vol สด vs Vol Settle)*:\n"
         f"   • {skew_info['skew_direction']}\n"
@@ -3966,11 +4113,7 @@ def build_clean_section_messages(
     dist_s = round(abs(float(best_sell["entry_spot_num"]) - spot), 2)
     is_b_3sd = "3SD" in str(best_buy["short_title"])
     is_s_3sd = "3SD" in str(best_sell["short_title"])
-    vol_exp_warn = (
-        f"⚠️ *เตือน Vol Expansion (`Vol Chg {snap.vol_chg:+.2f}%` / ATM `{snap.atm_iv:.2f}%`)*: ระวัง Negative Gamma Squeeze (Amaya et al., 2025) ห้ามรับมีดโดยไม่รอแท่งหยุดไหล!\n"
-        if snap.vol_chg >= 1.0
-        else ""
-    )
+    vol_exp_warn = (f"{r_sig['gamma_phase']}\n" if r_sig['gamma_phase'] else "") + (f"{r_sig['vanna_trigger']}\n" if r_sig['vanna_trigger'] else "")
 
     if snap.dte < 0.04:
         action_now = "🚨 *งดดักสวน Mean Reversion ทุกด่าน!* (อยู่ในช่วง 30–60 นาทีสุดท้าย DTE < 0.04 ตามวิจัย Adams et al., 2025)"
@@ -4032,7 +4175,7 @@ def build_clean_section_messages(
 def synthesize_full_report_messages(snap: HizeirisSnapshot, exact_calc: Dict, capture: Optional[Dict[str, object]],
                                     api_key: str, prev_state: Optional[Dict], round_history: List[Dict], first_touch_map: Optional[Dict] = None) -> List[str]:
     if CONFIG["DRY_RUN"] or api_key == "YOUR_GEMINI_API_KEY_HERE" or not capture:
-        return build_clean_section_messages(snap, exact_calc, round_history, build_deterministic_quant_audit(snap, exact_calc), first_touch_map)
+        return build_clean_section_messages(snap, exact_calc, round_history, build_deterministic_quant_audit(snap, exact_calc), first_touch_map, prev_state)
 
     tb = exact_calc["sd_table_exact"]
     ws = exact_calc["walls_spot"]
@@ -4061,7 +4204,7 @@ def synthesize_full_report_messages(snap: HizeirisSnapshot, exact_calc: Dict, ca
     except Exception:
         ai_audit = build_deterministic_quant_audit(snap, exact_calc)
 
-    return build_clean_section_messages(snap, exact_calc, round_history, ai_audit, first_touch_map)
+    return build_clean_section_messages(snap, exact_calc, round_history, ai_audit, first_touch_map, prev_state)
 
 
 def _prepare_fast_telegram_image(path: str) -> str:
@@ -4513,6 +4656,12 @@ def run_once():
 
     first_touch_map = _evaluate_first_touch_status(exact_calc["spot"], tb, exact_calc["walls_spot"], prev_state, today_str, day_high=api_day_high, day_low=api_day_low, contract_name=snap.contract_name)
     section_messages = synthesize_full_report_messages(snap, exact_calc, cap, CONFIG["GEMINI_API_KEY"], prev_state, round_history, first_touch_map)
+    eod_sent_contract = str(prev_state.get("eod_scorecard_sent_contract", "")) if prev_state else ""
+    now_eod = now_th()
+    if now_eod.hour == 1 and 0 <= now_eod.minute <= 29 and eod_sent_contract != snap.contract_name:
+        section_messages.append(_build_eod_quant_scorecard(snap, exact_calc, first_touch_map))
+        eod_sent_contract = snap.contract_name
+        print(f"📋 เพิ่มข้อความสรุปสถิติปิดวัน (EOD Quant Scorecard) สำหรับสัญญา {snap.contract_name} เรียบร้อย!")
     send_telegram_parts(section_messages, CONFIG["TELEGRAM_BOT_TOKEN"], CONFIG["TELEGRAM_CHAT_ID"])
 
     # สร้างและส่ง "ภาพสรุปแผนการเล่นฟันธงฉบับเข้าใจง่าย" ปิดท้ายรายงานเป็นลำดับสุดท้าย
@@ -4551,6 +4700,7 @@ def run_once():
         "session_high": first_touch_map.get("_session_high", exact_calc["spot"]),
         "session_low": first_touch_map.get("_session_low", exact_calc["spot"]),
         "touched_zones": first_touch_map.get("_raw_touched_map", {}),
+        "eod_scorecard_sent_contract": eod_sent_contract,
         "round_history": round_history,
     })
     print("🎉 ส่งรูปกราฟ 4 ภาพ และรายงานที่ล็อกราคาเปิดตรงกับหน้าเว็บ Hizeiris 100% เข้า Telegram เสร็จสมบูรณ์!")
