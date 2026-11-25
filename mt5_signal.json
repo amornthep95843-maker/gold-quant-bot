@@ -1,15 +1,15 @@
 {
   "trading_day": "2026-11-26",
-  "updated_th": "2026-11-26 00:49",
+  "updated_th": "2026-11-26 01:07",
   "contract": "G4WX6",
-  "round_str": "รอบ 195/195",
-  "dte": 0.04,
-  "dte_lock": false,
+  "round_str": "รอบ 197/197",
+  "dte": 0.02,
+  "dte_lock": true,
   "open_spot": 3559.4,
-  "spot_now": 3504.57,
+  "spot_now": 3534.16,
   "put_wall": 3497.5,
-  "call_wall": 3562.5,
-  "max_pain": 3552.5,
+  "call_wall": 3572.5,
+  "max_pain": 3537.5,
   "zones": [
     {
       "id": "BUY_1SD",
@@ -58,12 +58,12 @@
     {
       "id": "CALL_WALL",
       "side": "SELL",
-      "entry": 3562.5,
-      "tp1": 3552.5,
-      "tp2": 3537.5,
-      "sl_normal": 3570.5,
-      "sl_rec1": 3575.0,
-      "rec1_tp": 3587.5,
+      "entry": 3572.5,
+      "tp1": 3562.5,
+      "tp2": 3547.5,
+      "sl_normal": 3580.5,
+      "sl_rec1": 3585.0,
+      "rec1_tp": 3597.5,
       "status": "PASSED"
     }
   ]
