@@ -1,7 +1,11 @@
 {
   "trading_day": "2026-11-25",
   "contract_name": "OG4X6",
+<<<<<<< Updated upstream
   "timestamp": "2026-11-26 05:34",
+=======
+  "timestamp": "2026-11-26 05:36",
+>>>>>>> Stashed changes
   "round_str": "รอบ 80/80",
   "daily_open_fut": 3586.9,
   "daily_open_spot": 3559.4,
@@ -47,7 +51,11 @@
     },
     "CALL_WALL": {
       "status": "PASSED",
+<<<<<<< Updated upstream
       "time": "05:04",
+=======
+      "time": "05:36",
+>>>>>>> Stashed changes
       "price": "3,589.43",
       "zone_px": "3,572.50"
     }
@@ -174,6 +182,7 @@
       "call_wall": 3600.0
     },
     {
+<<<<<<< Updated upstream
       "time": "04:07",
       "round_str": "รอบ 77/77",
       "dte": 1.89,
@@ -235,6 +244,9 @@
     },
     {
       "time": "05:34",
+=======
+      "time": "05:36",
+>>>>>>> Stashed changes
       "round_str": "รอบ 80/80",
       "dte": 1.86,
       "live_1sd": 100.5,

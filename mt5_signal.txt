@@ -1,5 +1,9 @@
 TRADING_DAY=2026-11-25
+<<<<<<< Updated upstream
 UPDATED_TH=2026-11-26 05:34
+=======
+UPDATED_TH=2026-11-26 05:36
+>>>>>>> Stashed changes
 CONTRACT=OG4X6
 ROUND_STR=รอบ 80/80
 DTE=1.86

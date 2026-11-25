@@ -1,6 +1,10 @@
 {
   "trading_day": "2026-11-25",
+<<<<<<< Updated upstream
   "updated_th": "2026-11-26 05:34",
+=======
+  "updated_th": "2026-11-26 05:36",
+>>>>>>> Stashed changes
   "contract": "OG4X6",
   "round_str": "รอบ 80/80",
   "dte": 1.86,
