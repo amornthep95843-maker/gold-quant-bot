@@ -3714,6 +3714,7 @@ def _evaluate_first_touch_status(
     today_str: str,
     day_high: Optional[float] = None,
     day_low: Optional[float] = None,
+    contract_name: str = "",
 ) -> Dict[str, Dict[str, object]]:
     """
     ระบบตรวจสถานะโซนงานวิจัย 3 ระดับ (First Touch / Passed-Broken Tracker) ตามวันเทรดจริง CME (06:00–05:59 น.):
@@ -3726,13 +3727,19 @@ def _evaluate_first_touch_status(
     2) ช่วงเช้า 06:00–06:24 น. (ก่อนเว็บ Hizeiris อัปเดตราคาเปิดวันใหม่เสร็จ) จะยังไม่ล็อกสถานะแตะ/ทะลุ
     """
     cur_dt = now_th()
-    is_same_cme_day = bool(prev_state and prev_state.get("trading_day") == today_str)
-    # เช็กว่าข้อมูลวันเดิมไม่ได้ติดมาจากบั๊ก 00:00 เก่า (ถ้า open_spot เปลี่ยนเกิน 15 จุดจากรอบก่อน ถือเป็นเซสชันใหม่ทันที)
+    prev_contract = str(prev_state.get("contract_name", "")) if prev_state else ""
+    series_rolled = bool(contract_name and prev_contract and contract_name != prev_contract)
+    is_same_cme_day = bool(prev_state and prev_state.get("trading_day") == today_str and not series_rolled)
+
+    # หากเปลี่ยนซีรีส์สัญญา (เช่น G4WX6 -> OG4X6 หลัง 01:30 น.) หรือเปลี่ยนราคาเปิด > 15 จุด ให้รีเซ็ตสถานะโซนเป็น FRESH ใหม่ 100%!
     if is_same_cme_day and prev_state:
         prev_open_sp = float(prev_state.get("daily_open_spot", 0.0))
         cur_open_sp = round((float(tb_morning["buy_1sd"]) + float(tb_morning["sell_1sd"])) / 2.0, 2)
         if prev_open_sp > 1000 and abs(prev_open_sp - cur_open_sp) > 15.0:
             is_same_cme_day = False
+
+    if series_rolled:
+        print(f"🔄 ตรวจพบการเปลี่ยนซีรีส์สัญญาใหม่ ({prev_contract} -> {contract_name})! รีเซ็ตสถานะ First Touch และ High/Low เป็นสดใหม่ 100%")
 
     touched_map: Dict[str, Dict[str, str]] = {}
     prev_hi, prev_lo = spot, spot
@@ -3741,8 +3748,11 @@ def _evaluate_first_touch_status(
         prev_hi = float(prev_state.get("session_high", spot))
         prev_lo = float(prev_state.get("session_low", spot))
 
-    # ใช้เฉพาะราคา High/Low ที่สมเหตุสมผลในวันเทรด CME ปัจจุบัน (หากเพิ่งเปิดเซสชัน 06:00–06:40 น. ไม่ดึง Day High/Low ของเมื่อวานจาก TradingView มาปน)
-    use_tv_hl = not (cur_dt.hour == 6 and cur_dt.minute < 40)
+    # กฎป้องกัน High/Low ข้ามซีรีส์:
+    # ช่วง 01:30–06:59 น. (หลังซีรีส์เก่าหมดอายุตอน 01:30 น. และเริ่มซีรีส์ใหม่แล้ว แต่แท่ง Day ของ TradingView ยังจำ Low/High ของซีรีส์เก่าอยู่)
+    # ห้ามเอา Day High/Low 24 ชม. ของ TradingView มาปนกับซีรีส์ใหม่เด็ดขาด! ให้ใช้เฉพาะราคาจริงของซีรีส์ใหม่นี้เท่านั้น
+    is_after_expiry_new_series = (cur_dt.hour == 1 and cur_dt.minute >= 30) or (2 <= cur_dt.hour <= 6)
+    use_tv_hl = (not series_rolled) and (not is_after_expiry_new_series)
     hi_cands = [spot, prev_hi] + ([day_high] if (use_tv_hl and day_high and day_high > 0) else [])
     lo_cands = [spot, prev_lo] + ([day_low] if (use_tv_hl and day_low and day_low > 0) else [])
     eff_high = round(max(hi_cands), 2)
@@ -3972,12 +3982,14 @@ def build_clean_section_messages(
         if is_b_3sd:
             action_now = f"⚠️ *ด่าน BUY ถัดไปคือ 3SD (`{best_buy['entry_spot']}`) — ห้ามตั้ง Pending รับมีดไม้แรก!* (งานวิจัย: ฝืนรับมีดไม้แรกที่ 3SD ชนะ `<55%`) ให้เฝ้ารอราคาหยุดไหลเกิด Absorption + IV พีคหักหัวลงก่อนเข้า"
         else:
-            action_now = f"⏳ *ห้ามเข้ากลางอากาศ!* ตั้ง Pending รอ *BUY ด่านสดใหม่แรก* ที่ `{best_buy['entry_spot']}` (ห่าง `{dist_b:.2f}` จุด) และตั้ง SELL ดักด้านบนที่ `{best_sell['entry_spot']}`"
+            opp_sell_txt = f"ส่วนฝั่ง SELL (`3SD {best_sell['entry_spot']}`) ห้ามตั้ง Pending ขวาง ให้รอหยุดวิ่ง + IV หักหัวลงก่อน" if is_s_3sd else f"และตั้ง SELL ดักด้านบนที่ `{best_sell['entry_spot']}`"
+            action_now = f"⏳ *ห้ามเข้ากลางอากาศ!* ตั้ง Pending รอ *BUY ด่านสดใหม่แรก* ที่ `{best_buy['entry_spot']}` (ห่าง `{dist_b:.2f}` จุด) {opp_sell_txt}"
     else:
         if is_s_3sd:
             action_now = f"⚠️ *ด่าน SELL ถัดไปคือ 3SD (`{best_sell['entry_spot']}`) — ห้ามตั้ง Pending ขวางรถไฟไม้แรก!* ให้รอราคาหยุดวิ่งเกิด Absorption + IV พีคหักหัวลงก่อนเข้า"
         else:
-            action_now = f"⏳ *ห้ามเข้ากลางอากาศ!* ตั้ง Pending รอ *SELL ด่านสดใหม่แรก* ที่ `{best_sell['entry_spot']}` (ห่าง `{dist_s:.2f}` จุด) และตั้ง BUY ดักด้านล่างที่ `{best_buy['entry_spot']}`"
+            opp_buy_txt = f"ส่วนฝั่ง BUY (`3SD {best_buy['entry_spot']}`) ห้ามตั้ง Pending รับมีด ให้รอหยุดไหล + IV หักหัวลงก่อน" if is_b_3sd else f"และตั้ง BUY ดักด้านล่างที่ `{best_buy['entry_spot']}`"
+            action_now = f"⏳ *ห้ามเข้ากลางอากาศ!* ตั้ง Pending รอ *SELL ด่านสดใหม่แรก* ที่ `{best_sell['entry_spot']}` (ห่าง `{dist_s:.2f}` จุด) {opp_buy_txt}"
 
     # เหตุผลอิงระยะห่างจริงกับ Put Wall / Call Wall / Max Pain (ไม่เขียน "ใกล้กำแพง" ถ้าห่างเกิน 15 จุด!)
     b_entry_f = float(best_buy["entry_spot_num"])
@@ -4499,7 +4511,7 @@ def run_once():
     old_history.append(current_round_entry)
     round_history = old_history[-48:]
 
-    first_touch_map = _evaluate_first_touch_status(exact_calc["spot"], tb, exact_calc["walls_spot"], prev_state, today_str, day_high=api_day_high, day_low=api_day_low)
+    first_touch_map = _evaluate_first_touch_status(exact_calc["spot"], tb, exact_calc["walls_spot"], prev_state, today_str, day_high=api_day_high, day_low=api_day_low, contract_name=snap.contract_name)
     section_messages = synthesize_full_report_messages(snap, exact_calc, cap, CONFIG["GEMINI_API_KEY"], prev_state, round_history, first_touch_map)
     send_telegram_parts(section_messages, CONFIG["TELEGRAM_BOT_TOKEN"], CONFIG["TELEGRAM_CHAT_ID"])
 
@@ -4515,6 +4527,7 @@ def run_once():
     write_mt5_signal_files(snap, exact_calc, first_touch_map, today_str)
     save_and_push_state(CONFIG["STATE_FILE"], {
         "trading_day": today_str,
+        "contract_name": snap.contract_name,
         "timestamp": snap.timestamp,
         "round_str": snap.round_str,
         "daily_open_fut": exact_calc["open_fut"],
