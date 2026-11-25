@@ -36,6 +36,16 @@ TH_TZ = timezone(timedelta(hours=7))
 
 def now_th() -> datetime:
     return datetime.now(TH_TZ)
+
+
+def get_cme_trading_day(dt=None) -> str:
+    """
+    วันเทรดจริงของตลาด CME Gold (เวลาไทย UTC+7):
+    - เริ่มวันเทรดใหม่ตอน 06:00 น. และจบวันเทรดตอน 05:59 น. ของวันถัดไป
+    - ป้องกันบั๊ก 00:06 น. เอา High/Low และโซนที่แตะของ "เมื่อวาน" มาปนกับวันใหม่!
+    """
+    cur = dt or now_th()
+    return (cur - timedelta(hours=6)).strftime("%Y-%m-%d")
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -412,8 +422,16 @@ def evaluate_iv_smile_skew_and_dte_progression(
     # ใช้ค่าจริงจากกราฟรอบปัจจุบัน 100% เสมอ (ยกเลิกค่าตายตัว +3.7/+7.5 ที่เคยหลอกให้เอียงขวาทุกครั้ง)
     has_real_wings = (snap.iv_put_wing_live > 5.0 and snap.iv_call_wing_live > 5.0)
     if has_real_wings:
-        put_w_live = round(snap.iv_put_wing_live, 2)
-        call_w_live = round(snap.iv_call_wing_live, 2)
+        # ตรวจสเกล Volatility Smile: ปีกซ้าย/ขวาต้องไม่ต่ำกว่า ATM IV จริง (หากสเกลแกนเลื่อน ให้ยึดความต่าง Skew แล้วบวกจาก ATM จริง)
+        raw_p = round(snap.iv_put_wing_live, 2)
+        raw_c = round(snap.iv_call_wing_live, 2)
+        if raw_p < snap.atm_iv or raw_c < snap.atm_iv:
+            shift = max(snap.atm_iv - min(raw_p, raw_c), 0.0) + 1.5
+            put_w_live = round(raw_p + shift, 2)
+            call_w_live = round(raw_c + shift, 2)
+        else:
+            put_w_live = raw_p
+            call_w_live = raw_c
         put_w_settle = round(snap.iv_put_wing_settle, 2) if snap.iv_put_wing_settle > 5.0 else round(snap.vol_settle_atm + 2.5, 2)
         call_w_settle = round(snap.iv_call_wing_settle, 2) if snap.iv_call_wing_settle > 5.0 else round(snap.vol_settle_atm + 2.5, 2)
     else:
@@ -1710,7 +1728,7 @@ def _scan_vol_curves_from_screenshot(
             if 1 <= len(r_ys) <= 7 and (max(r_ys) - min(r_ys)) <= 9:
                 red_pts.append((x, sum(r_ys) / len(r_ys)))
 
-        def _pts_to_wings(pts: List[Tuple[int, float]]) -> Optional[Tuple[float, float]]:
+        def _pts_to_wings(pts: List[Tuple[int, float]], base_atm_iv: float) -> Optional[Tuple[float, float]]:
             if len(pts) < 10:
                 return None
             pts.sort(key=lambda p: p[0])
@@ -1721,18 +1739,26 @@ def _scan_vol_curves_from_screenshot(
             k = max(3, len(sm) // 10)
             left_y = sum(p[1] for p in sm[:k]) / k
             right_y = sum(p[1] for p in sm[-k:]) / k
-            # แปลงพิกัด Y เป็น %IV ตามสเกลแกนขวาจริงของกราฟ
-            p_iv = round(y_pct_top - (left_y / float(ch)) * (y_pct_top - y_pct_bot), 2)
-            c_iv = round(y_pct_top - (right_y / float(ch)) * (y_pct_top - y_pct_bot), 2)
-            if 5.0 <= p_iv <= 95.0 and 5.0 <= c_iv <= 95.0:
+            atm_y = max(p[1] for p in sm)  # จุดต่ำสุดของเส้นโค้ง U (ก้นหลุม ATM)
+            span_pct = max(y_pct_top - y_pct_bot, 12.0)
+
+            # ล็อกก้นหลุม ATM = base_atm_iv จริงของรอบนี้ แล้วคำนวณความสูงปีกซ้าย/ขวาเหนือ ATM
+            if base_atm_iv > 5.0:
+                px_to_pct = span_pct / float(ch)
+                p_iv = round(base_atm_iv + max(0.0, (atm_y - left_y) * px_to_pct), 2)
+                c_iv = round(base_atm_iv + max(0.0, (atm_y - right_y) * px_to_pct), 2)
+            else:
+                p_iv = round(y_pct_top - (left_y / float(ch)) * span_pct, 2)
+                c_iv = round(y_pct_top - (right_y / float(ch)) * span_pct, 2)
+            if 5.0 <= p_iv <= 150.0 and 5.0 <= c_iv <= 150.0:
                 return (p_iv, c_iv)
             return None
 
-        g_wings = _pts_to_wings(green_pts)
+        g_wings = _pts_to_wings(green_pts, atm_iv_ref)
         if g_wings:
             out["iv_put_wing_live"] = g_wings[0]
             out["iv_call_wing_live"] = g_wings[1]
-        r_wings = _pts_to_wings(red_pts)
+        r_wings = _pts_to_wings(red_pts, vol_settle_ref)
         if r_wings:
             out["iv_put_wing_settle"] = r_wings[0]
             out["iv_call_wing_settle"] = r_wings[1]
@@ -2266,7 +2292,9 @@ def capture_hizeiris_web(url: str, profile_dir: str, fixed_dte: float = 0.8) -> 
         screenshots.append(shot_cme_vol)
         photo_captions.append((shot_cme_vol, "📊 [ภาพที่ 2] แท็บ CME · Vol (ข้อมูลรอบปัจจุบัน) & กราฟ Intraday + OI"))
         text_main = _extract_frame_texts_and_inputs(page)
-        svg_metrics = _extract_realtime_chart_svg_metrics(page, shot_path=shot_cme_vol)
+        _tmp_atm = _parse_float(r"ATM\s*vol\s*([0-9]+\.?[0-9]*)", text_main, 0.0)
+        _tmp_vchg = _parse_float(r"Vol\s*Chg\s*([+\-]?[0-9]+\.?[0-9]*)", text_main, 0.0)
+        svg_metrics = _extract_realtime_chart_svg_metrics(page, shot_path=shot_cme_vol, atm_iv_ref=_tmp_atm, vol_settle_ref=round(_tmp_atm - _tmp_vchg, 2) if _tmp_atm > 0 else 0.0)
         print(f"✅ แคปภาพที่ 2 (แท็บ CME · Vol รอบปัจจุบัน, ดึงหัวเสา SVG จริง {len(svg_metrics.get('pillars', []))} เสา) สำเร็จ!")
 
         if _click_tab_button_in_frames(page, ["OI", "ทุกสัญญา"]):
@@ -2454,7 +2482,7 @@ def parse_snapshot_from_dom_text(
         mid_spot = round((sd_diff_table["buy_1sd"] + sd_diff_table["sell_1sd"]) / 2.0, 2)
         table_midpoint_open_fut = round(mid_spot + final_diff, 2)
 
-    today_str = now_th().strftime("%Y-%m-%d")
+    today_str = get_cme_trading_day()
     prev_open = float(prev_state.get("daily_open_fut", 0.0)) if prev_state else 0.0
     prev_open_iv = float(prev_state.get("open_iv", 0.0)) if prev_state else 0.0
     future_chg = _parse_float(r"Future\s*Chg\s*([+\-]?[0-9]+\.?[0-9]*)", raw_text, 0.0)
@@ -3614,20 +3642,37 @@ def _evaluate_first_touch_status(
     day_low: Optional[float] = None,
 ) -> Dict[str, Dict[str, object]]:
     """
-    ระบบตรวจสถานะโซนงานวิจัย 3 ระดับ (First Touch / Passed-Broken Tracker) + อิง Day High / Day Low จริงของวัน:
+    ระบบตรวจสถานะโซนงานวิจัย 3 ระดับ (First Touch / Passed-Broken Tracker) ตามวันเทรดจริง CME (06:00–05:59 น.):
     - FRESH  : 🆕 สดใหม่ (First Touch — เข้าได้ตามเงื่อนไขวิจัย)
     - TOUCHED: 🟡 แตะแล้วเด้ง (ใช้สิทธิ์ First Touch ไปแล้ว — งดเข้าซ้ำรอบ 2!)
-    - PASSED : 🔴 วิ่งทะลุผ่านไปแล้ว (เลยโซน > 6 จุด — ปิดโซนถาวร ข้ามไปรอด่านสดใหม่ถัดไป!)
+    - PASSED : 🔴 วิ่งทะลุผ่านไปแล้ว (เลยโซน > 6 จุดจริงๆ — ปิดโซนถาวร ข้ามไปด่านสดใหม่ถัดไป!)
+    กฎป้องกันบั๊ก:
+    1) ตรวจความจริงทางคณิตศาสตร์ทุกครั้ง: ฝั่ง BUY จะเป็น PASSED ได้ต่อเมื่อ eff_low <= zpx - 6.0 จริงเท่านั้น
+       (ป้องกันกรณีตารางโหลดคลาดเคลื่อนชั่วคราวแล้วล็อก PASSED ปลอมใส่ด่าน 2SD ที่ยังไม่เคยแตะ!)
+    2) ช่วงเช้า 06:00–06:24 น. (ก่อนเว็บ Hizeiris อัปเดตราคาเปิดวันใหม่เสร็จ) จะยังไม่ล็อกสถานะแตะ/ทะลุ
     """
+    cur_dt = now_th()
+    is_same_cme_day = bool(prev_state and prev_state.get("trading_day") == today_str)
+    # เช็กว่าข้อมูลวันเดิมไม่ได้ติดมาจากบั๊ก 00:00 เก่า (ถ้า open_spot เปลี่ยนเกิน 15 จุดจากรอบก่อน ถือเป็นเซสชันใหม่ทันที)
+    if is_same_cme_day and prev_state:
+        prev_open_sp = float(prev_state.get("daily_open_spot", 0.0))
+        cur_open_sp = round((float(tb_morning["buy_1sd"]) + float(tb_morning["sell_1sd"])) / 2.0, 2)
+        if prev_open_sp > 1000 and abs(prev_open_sp - cur_open_sp) > 15.0:
+            is_same_cme_day = False
+
     touched_map: Dict[str, Dict[str, str]] = {}
     prev_hi, prev_lo = spot, spot
-    if prev_state and prev_state.get("trading_day") == today_str:
+    if is_same_cme_day and prev_state:
         touched_map = dict(prev_state.get("touched_zones", {}))
         prev_hi = float(prev_state.get("session_high", spot))
         prev_lo = float(prev_state.get("session_low", spot))
 
-    eff_high = round(max([v for v in [spot, prev_hi, day_high] if v is not None and v > 0]), 2)
-    eff_low = round(min([v for v in [spot, prev_lo, day_low] if v is not None and v > 0]), 2)
+    # ใช้เฉพาะราคา High/Low ที่สมเหตุสมผลในวันเทรด CME ปัจจุบัน (หากเพิ่งเปิดเซสชัน 06:00–06:40 น. ไม่ดึง Day High/Low ของเมื่อวานจาก TradingView มาปน)
+    use_tv_hl = not (cur_dt.hour == 6 and cur_dt.minute < 40)
+    hi_cands = [spot, prev_hi] + ([day_high] if (use_tv_hl and day_high and day_high > 0) else [])
+    lo_cands = [spot, prev_lo] + ([day_low] if (use_tv_hl and day_low and day_low > 0) else [])
+    eff_high = round(max(hi_cands), 2)
+    eff_low = round(min(lo_cands), 2)
 
     zones_def = [
         ("BUY_1SD", "1SD BUY เช้า", float(tb_morning["buy_1sd"]), "BUY"),
@@ -3640,11 +3685,11 @@ def _evaluate_first_touch_status(
         ("CALL_WALL", "กำแพง Call Wall", float(ws["call_wall_spot"]), "SELL"),
     ]
 
-    now_hm = now_th().strftime("%H:%M")
+    now_hm = cur_dt.strftime("%H:%M")
     status_out: Dict[str, Dict[str, object]] = {}
+    clean_touched_map: Dict[str, Dict[str, str]] = {}
 
     for zkey, zlabel, zpx, zside in zones_def:
-        # ตรวจว่าวิ่งทะลุผ่านไปแล้ว (> 6.0 จุด) หรือแตะโซนแล้ว (<= 2.5 จุด) จากทั้งราคาปัจจุบันและ High/Low ของวัน
         if zside == "BUY":
             passed_now = (eff_low <= zpx - 6.0)
             touched_now = (eff_low <= zpx + 2.5)
@@ -3655,20 +3700,19 @@ def _evaluate_first_touch_status(
             extreme_px = eff_high
 
         existing = touched_map.get(zkey)
-        prev_st = existing.get("status", "TOUCHED") if isinstance(existing, dict) else "FRESH"
-
-        if passed_now or prev_st == "PASSED":
+        # ตรวจยืนยันด้วย eff_low / eff_high จริงเสมอ! ถ้ายังไม่เคยแตะจริง (เช่น 3,454.20 > 3,436.44) ห้ามล็อก PASSED ปลอมเด็ดขาด!
+        if passed_now:
             cur_status = "PASSED"
-            t_time = existing.get("time", now_hm) if isinstance(existing, dict) else now_hm
-            touched_map[zkey] = {"status": "PASSED", "time": t_time, "price": f"{extreme_px:,.2f}", "zone_px": f"{zpx:,.2f}"}
-        elif touched_now or prev_st == "TOUCHED":
+            t_time = existing.get("time", now_hm) if (isinstance(existing, dict) and existing.get("status") == "PASSED") else now_hm
+            clean_touched_map[zkey] = {"status": "PASSED", "time": t_time, "price": f"{extreme_px:,.2f}", "zone_px": f"{zpx:,.2f}"}
+        elif touched_now:
             cur_status = "TOUCHED"
             t_time = existing.get("time", now_hm) if isinstance(existing, dict) else now_hm
-            touched_map[zkey] = {"status": "TOUCHED", "time": t_time, "price": f"{extreme_px:,.2f}", "zone_px": f"{zpx:,.2f}"}
+            clean_touched_map[zkey] = {"status": "TOUCHED", "time": t_time, "price": f"{extreme_px:,.2f}", "zone_px": f"{zpx:,.2f}"}
         else:
             cur_status = "FRESH"
 
-        touch_info = touched_map.get(zkey)
+        touch_info = clean_touched_map.get(zkey)
         if cur_status == "PASSED":
             badge = f"🔴 วิ่งทะลุผ่านไปแล้ว ({touch_info['time']} น., ลึกสุด {touch_info['price']}) — ปิดโซนถาวร ข้ามไปด่านถัดไป!"
             short_badge = "ทะลุแล้ว (ข้ามด่าน)"
@@ -3696,7 +3740,7 @@ def _evaluate_first_touch_status(
             "ruler_tag": ruler_tag,
         }
 
-    status_out["_raw_touched_map"] = touched_map
+    status_out["_raw_touched_map"] = clean_touched_map
     status_out["_session_high"] = eff_high
     status_out["_session_low"] = eff_low
     return status_out
@@ -3808,6 +3852,8 @@ def build_clean_section_messages(
             touched_summary_list.append(f"{st_lbl} {info['label']} ({info['touch_info']['time']} น.)")
     touched_str = ", ".join(touched_summary_list) if touched_summary_list else "ยังไม่มีโซนใดถูกแตะ (ทุกด่านสดใหม่ First Touch 100%)"
 
+    vol_exp_m2_line = f"   • 🚨 *Vol Expansion (`Vol Chg {snap.vol_chg:+.2f}%`)*: ความผันผวนพุ่งเหนือฐาน ระวัง Negative Gamma Squeeze!\n\n" if snap.vol_chg >= 1.0 else "\n"
+
     msg_2 = (
         f"📊 *วิเคราะห์เชิงปริมาณ: เทียบกรอบเช้า (0.8) vs รอบนี้ (`DTE {snap.dte:.2f}`)*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -3821,7 +3867,7 @@ def build_clean_section_messages(
         f"3️⃣ *การเอียงของเส้น IV (Vol สด vs Vol Settle)*:\n"
         f"   • {skew_info['skew_direction']}\n"
         f"   • Put Wing `{skew_info['put_w_live']}` | ATM `{snap.atm_iv:.2f}%` (`Vol Chg {snap.vol_chg:+.2f}%`) | Call Wing `{skew_info['call_w_live']}`\n"
-        f"   • กฎเวลา 0DTE: {m4['eod_warning']}\n\n"
+        f"   • กฎเวลา 0DTE: {m4['eod_warning']}\n{vol_exp_m2_line}"
         f"4️⃣ *บันทึกสถานะ First Touch วันนี้*: {touched_str}"
     )
 
@@ -3834,28 +3880,63 @@ def build_clean_section_messages(
 
     dist_b = round(abs(spot - float(best_buy["entry_spot_num"])), 2)
     dist_s = round(abs(float(best_sell["entry_spot_num"]) - spot), 2)
+    is_b_3sd = "3SD" in str(best_buy["short_title"])
+    is_s_3sd = "3SD" in str(best_sell["short_title"])
+    vol_exp_warn = (
+        f"⚠️ *เตือน Vol Expansion (`Vol Chg {snap.vol_chg:+.2f}%` / ATM `{snap.atm_iv:.2f}%`)*: ระวัง Negative Gamma Squeeze (Amaya et al., 2025) ห้ามรับมีดโดยไม่รอแท่งหยุดไหล!\n"
+        if snap.vol_chg >= 1.0
+        else ""
+    )
+
     if snap.dte < 0.04:
         action_now = "🚨 *งดดักสวน Mean Reversion ทุกด่าน!* (อยู่ในช่วง 30–60 นาทีสุดท้าย DTE < 0.04 ตามวิจัย Adams et al., 2025)"
     elif dist_b <= 6.0:
-        action_now = f"🟢 *เตรียมเข้า BUY ทันที* ที่ด่านสดใหม่ `{best_buy['short_title']}` (`{best_buy['entry_spot']}`) เมื่อแท่งเทียนหยุดไหล"
+        action_now = f"🟢 *เตรียมเข้า BUY ทันที* ที่ด่านสดใหม่ `{best_buy['short_title']}` (`{best_buy['entry_spot']}`) เมื่อแท่งเทียนหยุดไหลและเส้น IV เริ่มหักหัวลง"
     elif dist_s <= 6.0:
         action_now = f"🔴 *เตรียมเข้า SELL ทันที* ที่ด่านสดใหม่ `{best_sell['short_title']}` (`{best_sell['entry_spot']}`) เมื่อแรงซื้อชะลอตัว"
     elif dist_b <= dist_s:
-        action_now = f"⏳ *ห้ามเข้ากลางอากาศ!* ตั้ง Pending รอ *BUY ด่านสดใหม่แรก* ที่ `{best_buy['entry_spot']}` (ห่าง `{dist_b:.2f}` จุด) และตั้ง SELL ดักด้านบนที่ `{best_sell['entry_spot']}`"
+        if is_b_3sd:
+            action_now = f"⚠️ *ด่าน BUY ถัดไปคือ 3SD (`{best_buy['entry_spot']}`) — ห้ามตั้ง Pending รับมีดไม้แรก!* (งานวิจัย: ฝืนรับมีดไม้แรกที่ 3SD ชนะ `<55%`) ให้เฝ้ารอราคาหยุดไหลเกิด Absorption + IV พีคหักหัวลงก่อนเข้า"
+        else:
+            action_now = f"⏳ *ห้ามเข้ากลางอากาศ!* ตั้ง Pending รอ *BUY ด่านสดใหม่แรก* ที่ `{best_buy['entry_spot']}` (ห่าง `{dist_b:.2f}` จุด) และตั้ง SELL ดักด้านบนที่ `{best_sell['entry_spot']}`"
     else:
-        action_now = f"⏳ *ห้ามเข้ากลางอากาศ!* ตั้ง Pending รอ *SELL ด่านสดใหม่แรก* ที่ `{best_sell['entry_spot']}` (ห่าง `{dist_s:.2f}` จุด) และตั้ง BUY ดักด้านล่างที่ `{best_buy['entry_spot']}`"
+        if is_s_3sd:
+            action_now = f"⚠️ *ด่าน SELL ถัดไปคือ 3SD (`{best_sell['entry_spot']}`) — ห้ามตั้ง Pending ขวางรถไฟไม้แรก!* ให้รอราคาหยุดวิ่งเกิด Absorption + IV พีคหักหัวลงก่อนเข้า"
+        else:
+            action_now = f"⏳ *ห้ามเข้ากลางอากาศ!* ตั้ง Pending รอ *SELL ด่านสดใหม่แรก* ที่ `{best_sell['entry_spot']}` (ห่าง `{dist_s:.2f}` จุด) และตั้ง BUY ดักด้านล่างที่ `{best_buy['entry_spot']}`"
+
+    # เหตุผลอิงระยะห่างจริงกับ Put Wall / Call Wall / Max Pain (ไม่เขียน "ใกล้กำแพง" ถ้าห่างเกิน 15 จุด!)
+    b_entry_f = float(best_buy["entry_spot_num"])
+    s_entry_f = float(best_sell["entry_spot_num"])
+    d_b_pw = round(abs(b_entry_f - ws["put_wall_spot"]), 2)
+    d_s_cw = round(abs(s_entry_f - ws["call_wall_spot"]), 2)
+
+    if is_b_3sd:
+        b_reason = f"โซนปลายหาง 3SD (ต่ำกว่าเปิดเช้า `{open_spot - b_entry_f:.2f}` จุด, จบสวิง `96.3%`) — *ห้ามตั้ง Pending รับมีดไม้แรก!* ต้องรอแท่งหยุดไหล + IV หักหัวลงก่อนเข้าจึงจะได้อัตราชนะ `{b_pct_str}`"
+    elif d_b_pw <= 15.0:
+        b_reason = f"ด่านรับสดใหม่ครั้งแรกของวัน ต่ำกว่าเปิดเช้า `{open_spot - b_entry_f:.2f}` จุด และซ้อนทับใกล้กำแพง Put Wall (`{ws['put_wall_spot']:,.2f}`, ห่าง `{d_b_pw:.1f}` จุด) หนุนแรงดีดกลับ"
+    else:
+        b_reason = f"ด่านรับสดใหม่ครั้งแรกของวัน ต่ำกว่าเปิดเช้า `{open_spot - b_entry_f:.2f}` จุด (ราคาทะลุ Put Wall `{ws['put_wall_spot']:,.2f}` ลงมาแล้ว จึงต้องมารอดักรับในโซนตึงตัวลึกนี้แทน)"
+
+    if is_s_3sd:
+        s_reason = f"โซนปลายหาง 3SD (สูงกว่าเปิดเช้า `+{s_entry_f - open_spot:.2f}` จุด, จบสวิง `96.3%`) — *ห้ามตั้ง Pending ขวางไม้แรก!* รอแท่งหยุดวิ่ง + IV หักหัวลงก่อนเข้า"
+    elif d_s_cw <= 15.0:
+        s_reason = f"ด่านต้านสดใหม่ครั้งแรกของวัน สูงกว่าเปิดเช้า `+{s_entry_f - open_spot:.2f}` จุด และซ้อนทับใกล้กำแพง Call Wall (`{ws['call_wall_spot']:,.2f}`, ห่าง `{d_s_cw:.1f}` จุด) หนุนแรงย่อตัว"
+    else:
+        s_reason = f"ด่านต้านสดใหม่ครั้งแรกของวัน สูงกว่าเปิดเช้า `+{s_entry_f - open_spot:.2f}` จุด เป็นโซนตึงตัวด้านบนที่แรงซื้อไล่ราคาเริ่มหมดกำลัง (อยู่เหนือ Call Wall `{ws['call_wall_spot']:,.2f}`)"
 
     msg_3 = (
         f"🏆 *บทสรุปฟันธง: แผนการเล่นฉบับเข้าใจง่าย (อิงราคาจริง `{spot:,.2f}`)*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{vol_exp_warn}"
         f"🚦 *ตอนนี้ควรทำอะไรทันที?*: {action_now}\n\n"
         f"🟢 *จุดเข้า BUY ที่ดีที่สุดตอนนี้ (First Touch)*: *{best_buy['short_title']}*\n"
         f"   • เข้า BUY ที่ *`{best_buy['entry_spot']}`* -> TP `{best_buy['tp1']} / {best_buy['tp2']}` | SL ปกติ `{best_buy['sl_bozovic']}` (ชนะ *{b_pct_str}*)\n"
-        f"   • *เหตุผล*: เป็นด่านแนวรับสดใหม่ครั้งแรกของวัน ต่ำกว่าราคาเปิดเช้า `{open_spot - float(best_buy['entry_spot_num']):.2f}` จุด มีกำแพง Put Wall (`{ws['put_wall_spot']:,.2f}`) และจุดดูด Max Pain (`{ws['max_pain_spot']:,.2f}`) หนุนแรงดีดกลับ\n\n"
+        f"   • *เหตุผล*: {b_reason}\n\n"
         f"🔴 *จุดเข้า SELL ที่ดีที่สุดตอนนี้ (First Touch)*: *{best_sell['short_title']}*\n"
         f"   • เข้า SELL ที่ *`{best_sell['entry_spot']}`* -> TP `{best_sell['tp1']} / {best_sell['tp2']}` | SL ปกติ `{best_sell['sl_bozovic']}` (ชนะ *{s_pct_str}*)\n"
-        f"   • *เหตุผล*: เป็นด่านแนวต้านสดใหม่ครั้งแรกของวัน สูงกว่าราคาเปิดเช้า `+{float(best_sell['entry_spot_num']) - open_spot:.2f}` จุด แรงซื้อเริ่มตึงตัวและเข้าใกล้กำแพง Call Wall (`{ws['call_wall_spot']:,.2f}`)\n\n"
-        f"⚠️ *กฎเหล็ก 3 ข้อของงานวิจัย*: (1) *เข้าเฉพาะครั้งแรก (First Touch) เท่านั้น* โซนไหนแตะแล้วห้ามเข้าซ้ำ (2) ห้ามกดสวนกลางอากาศแถวราคาเปิด `{open_spot:,.2f}` (3) ห้ามไล่ทุบ SELL ที่แนวรับล่าง และตั้ง TP/SL ตามโพยทุกครั้ง\n"
+        f"   • *เหตุผล*: {s_reason}\n\n"
+        f"⚠️ *กฎเหล็ก 3 ข้อของงานวิจัย*: (1) *เข้าเฉพาะครั้งแรก (First Touch) เท่านั้น* โซนไหนแตะแล้วห้ามเข้าซ้ำ (2) *โซน 3SD ห้ามตั้ง Pending รับมีดไม้แรก* ต้องรอหยุดไหล + IV หักหัวลงก่อน (3) ห้ามกดสวนกลางอากาศแถวราคาเปิด `{open_spot:,.2f}` และตั้ง TP/SL ตามโพยทุกครั้ง\n"
         f"👇 _ดูภาพสรุปแผนปิดท้ายด้านล่างเพื่อเช็กพิกัดทั้งหมดในภาพเดียว_"
     )
 
@@ -4287,7 +4368,7 @@ def run_once():
                 CONFIG["TELEGRAM_CHAT_ID"],
             )
 
-    today_str = now_th().strftime("%Y-%m-%d")
+    today_str = get_cme_trading_day()
     old_history = []
     if prev_state and prev_state.get("trading_day") == today_str:
         old_history = list(prev_state.get("round_history", []))
