@@ -2038,6 +2038,66 @@ def _force_jump_to_latest_round(page) -> None:
             pass
 
 
+def _ensure_gc_gold_selected(page) -> bool:
+    """
+    บังคับกดปุ่ม 'GC' (ทองคำ) ทุกครั้งที่เปิดหน้าเว็บ Hizeiris!
+    ป้องกันปัญหาเว็บเด้งไปเลือก 'CL' (น้ำมัน WTI ราคา ~81.xx) เองโดยเฉพาะหลังทองคำ 0DTE หมดอายุตอน 01:30 น.
+    """
+    clicked_gc = False
+    for frame in page.frames:
+        try:
+            res = frame.locator("body").evaluate(
+                """body => {
+                    let didClick = false;
+                    // 1. ค้นหาและกดปุ่ม GC (ทองคำ) โดยตรง
+                    const els = Array.from(document.querySelectorAll('button, [role="button"], span, div'));
+                    for (const el of els) {
+                        if (el.children.length > 1) continue;
+                        const t = (el.innerText || '').trim();
+                        if (t === 'GC') {
+                            el.click();
+                            didClick = true;
+                            break;
+                        }
+                    }
+                    // 2. หากในดรอปดาวน์ Expiry ยังเป็น WTI ให้สลับไปเลือกตัวเลือกที่มีคำว่า Gold / GC / OG
+                    if (!didClick) {
+                        Array.from(document.querySelectorAll('select')).forEach(sel => {
+                            const curTxt = (sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : '');
+                            if (/WTI|CL|WL/i.test(curTxt)) {
+                                for (const opt of Array.from(sel.options || [])) {
+                                    if (/Gold|GC|OG|G[0-9]/i.test(opt.text || '')) {
+                                        sel.value = opt.value;
+                                        sel.dispatchEvent(new Event('change', { bubbles: true }));
+                                        didClick = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    return didClick;
+                }""",
+                timeout=3000,
+            )
+            if res:
+                clicked_gc = True
+        except Exception:
+            pass
+    if clicked_gc:
+        print("🥇 บังคับกดเลือกแท็บ GC (ทองคำ) บนหน้าเว็บ Hizeiris เรียบร้อย!")
+    return clicked_gc
+
+
+def _is_oil_or_non_gold_dom(text: str) -> bool:
+    """ตรวจจับว่าหน้าเว็บกำลังแสดงข้อมูลน้ำมัน (WTI/CL/NYM) แทนที่จะเป็นทองคำ (GC/Gold)"""
+    if not text:
+        return False
+    has_oil = bool(re.search(r"\b(WTI|CLF[0-9]{2}|CL[A-Z][0-9]{2}\.NYM|WL[0-9][A-Z][0-9]|LO[0-9][A-Z][0-9])\b", text, re.IGNORECASE))
+    has_gold = bool(re.search(r"\b(Gold|GC[A-Z][0-9]{2}\.CMX|OG[A-Z0-9]{2,5}|G[0-9][A-Z]{2}[0-9])\b", text, re.IGNORECASE))
+    return has_oil and not has_gold
+
+
 def _wait_for_latest_15min_round(page, url: str) -> None:
     """
     แก้ปัญหาเวลาส่งรายงานกับเวลารอบบนหน้าเว็บไม่ตรงกัน (เช่น ส่งตอน 07:30 แต่ได้รอบ 07:15):
@@ -2117,6 +2177,12 @@ def _configure_sd_diff_and_ensure_latest_round(page, fixed_dte: float) -> None:
         try:
             frame.locator("body").evaluate(
                 f"""body => {{
+                    // 0. บังคับเลือกปุ่ม GC (ทองคำ) เสมอ ไม่ให้หลุดไป CL (น้ำมัน)
+                    Array.from(document.querySelectorAll('button, span, div')).forEach(el => {{
+                        if (el.children.length > 1) return;
+                        if ((el.innerText || '').trim() === 'GC') el.click();
+                    }});
+
                     // 1. เลื่อนแถบเวลาไปรอบล่าสุดเสมอ
                     Array.from(document.querySelectorAll('input[type="range"]')).forEach(rng => {{
                         if (rng.max && rng.value !== rng.max) {{
@@ -2212,6 +2278,14 @@ def capture_hizeiris_web(url: str, profile_dir: str, fixed_dte: float = 0.8) -> 
         page.set_default_timeout(15000)
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(7500)
+        # บังคับสลับเป็น GC (ทองคำ) ทันที ป้องกันเว็บเด้งไปหน้า CL (น้ำมัน WTI)
+        _ensure_gc_gold_selected(page)
+        page.wait_for_timeout(2000)
+        # ตรวจซ้ำอีกครั้ง หากยังแสดง WTI/CL อยู่ ให้กด GC ซ้ำอีก 1 รอบ
+        if _is_oil_or_non_gold_dom(_extract_frame_texts_and_inputs(page)):
+            print("⚠️ ตรวจพบหน้าเว็บยังค้างอยู่ที่ CL (น้ำมัน WTI) -> สั่งคลิกปุ่ม GC ซ้ำอีกครั้ง...")
+            _ensure_gc_gold_selected(page)
+            page.wait_for_timeout(3000)
         _wait_for_latest_15min_round(page, url)
         _expand_iframes_for_full_charts(page)
         page.wait_for_timeout(800)
@@ -4356,6 +4430,27 @@ def run_once():
     )
     tb = exact_calc["sd_table_exact"]
     mvc = exact_calc["morning_vs_current"]
+    ws_chk = exact_calc["walls_spot"]
+
+    # ด่านป้องกันถาวร (Hard Gold Data Guard): ห้ามส่งข้อมูล 0.00 หรือข้อมูลน้ำมัน (CL/WTI) เข้า Telegram / MT5 เด็ดขาด!
+    raw_cap_txt = str(cap.get("raw_text") or "") if isinstance(cap, dict) else ""
+    is_oil_leak = _is_oil_or_non_gold_dom(raw_cap_txt)
+    invalid_gold_numbers = (
+        exact_calc["open_spot"] < 2500.0
+        or tb["range_1sd"] < 5.0
+        or tb["buy_1sd"] < 2500.0
+        or tb["sell_1sd"] < 2500.0
+        or ws_chk["put_wall_spot"] < 2500.0
+        or ws_chk["call_wall_spot"] < 2500.0
+    )
+    if not CONFIG["DRY_RUN"] and (is_oil_leak or invalid_gold_numbers):
+        print(
+            f"🛑 [GC Guard ทำงาน] ตรวจพบข้อมูลไม่ใช่ทองคำ GC หรือได้ค่า 0.00 "
+            f"(is_oil={is_oil_leak}, OpenSpot={exact_calc['open_spot']:.2f}, 1SD={tb['range_1sd']:.2f}, "
+            f"PutWall={ws_chk['put_wall_spot']:.2f}, CallWall={ws_chk['call_wall_spot']:.2f}) "
+            f"— ยกเลิกการส่งเข้า Telegram และไม่ทับไฟล์ mt5_signal เพื่อป้องกันข้อมูลเพี้ยน!"
+        )
+        return
 
     if not CONFIG["DRY_RUN"] and cap is not None:
         photos_to_send = list(cap.get("photo_captions", []))
