@@ -1,7 +1,7 @@
 {
   "trading_day": "2026-11-25",
-  "timestamp": "2026-11-25 20:34",
-  "round_str": "รอบ 148/148 เวลา 20:30 (เข้า 20:32)",
+  "timestamp": "2026-11-25 20:49",
+  "round_str": "รอบ 150/150 เวลา 20:45 (เข้า 20:47)",
   "daily_open_fut": 3586.9,
   "daily_open_spot": 3559.4,
   "open_iv": 36.61,
@@ -13,29 +13,29 @@
   "sell_2sd": 3682.36,
   "buy_3sd": 3374.97,
   "sell_3sd": 3743.83,
-  "futures_price": 3524.22,
-  "spot_price": 3496.72,
+  "futures_price": 3511.99,
+  "spot_price": 3484.49,
   "diff": 27.5,
-  "atm_iv": 58.66,
-  "vol_settle_atm": 47.09,
-  "intraday_c": 1561,
-  "intraday_p": 1127,
+  "atm_iv": 62.02,
+  "vol_settle_atm": 47.95,
+  "intraday_c": 1662,
+  "intraday_p": 1286,
   "put_wall": 3525.0,
   "call_wall": 3680.0,
   "max_pain": 3620.0,
   "session_high": 3678.49,
-  "session_low": 3484.51,
+  "session_low": 3469.29,
   "touched_zones": {
     "BUY_1SD": {
       "status": "PASSED",
       "time": "00:06",
-      "price": "3,484.51",
+      "price": "3,469.29",
       "zone_px": "3,497.92"
     },
     "PUT_WALL": {
       "status": "PASSED",
       "time": "00:06",
-      "price": "3,484.51",
+      "price": "3,469.29",
       "zone_px": "3,497.50"
     },
     "CALL_WALL": {
@@ -52,26 +52,6 @@
     }
   },
   "round_history": [
-    {
-      "time": "01:35",
-      "round_str": "รอบ 180/180 เวลา 01:30 (เข้า 01:32)",
-      "dte": 0.04,
-      "live_1sd": 0.0,
-      "skew_bias": "CALL_SKEW",
-      "fut": 3563.36,
-      "spot": 3563.36,
-      "delta_from_open": "+3.96",
-      "z_sd": "+0.06SD",
-      "atm_iv": 44.65,
-      "vol_chg": -9.14,
-      "intra_c": 1978,
-      "intra_p": 878,
-      "intra_pc": 0.44,
-      "oi_c": 490,
-      "oi_p": 175,
-      "put_wall": -20.0,
-      "call_wall": 60.0
-    },
     {
       "time": "02:04",
       "round_str": "รอบ 182/182 เวลา 02:00 (เข้า 02:03)",
@@ -1009,6 +989,26 @@
       "intra_pc": 0.72,
       "oi_c": 890,
       "oi_p": 1916,
+      "put_wall": 3525.0,
+      "call_wall": 3680.0
+    },
+    {
+      "time": "20:49",
+      "round_str": "รอบ 150/150 เวลา 20:45 (เข้า 20:47)",
+      "dte": 0.2,
+      "live_1sd": 51.3,
+      "skew_bias": "PUT_SKEW",
+      "fut": 3511.99,
+      "spot": 3484.49,
+      "delta_from_open": "-74.91",
+      "z_sd": "-1.22SD",
+      "atm_iv": 62.02,
+      "vol_chg": 14.07,
+      "intra_c": 1662,
+      "intra_p": 1286,
+      "intra_pc": 0.77,
+      "oi_c": 890,
+      "oi_p": 1922,
       "put_wall": 3525.0,
       "call_wall": 3680.0
     }
