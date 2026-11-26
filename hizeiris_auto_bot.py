@@ -2983,7 +2983,7 @@ def _render_final_plan_via_pillow(
         _draw_txt(
             draw,
             (40, 58),
-            f"{snap.contract_name} ({snap.round_str}) | DTE {snap.dte:.2f} | Diff {snap.diff:.2f} | {inst_iq['quadrant_code']} | VRP {inst_iq['vrp']:+.1f}% | {inst_iq['gex_short']}",
+            f"{snap.contract_name} | DTE {snap.dte:.2f} | 5-Pillar {inst_iq['confluence_score']:+d}/100 ({inst_iq['confidence_pct']}%) | {inst_iq['gex_short']} | Vanna {inst_iq['vanna_crush_gc']:+.0f}GC | Charm {inst_iq['charm_1h_gc']:+.0f}GC/h | VRP {inst_iq['vrp']:+.1f}%",
             sz=14,
             bold=False,
             fill=(203, 213, 225),
@@ -3834,24 +3834,36 @@ def _evaluate_first_touch_status(
 
 
 
+def _bs_norm_pdf(x: float) -> float:
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
 def compute_institutional_quant_models(
     snap: HizeirisSnapshot,
     exact_calc: Dict,
     round_history: List[Dict],
 ) -> Dict[str, object]:
     """
-    4 โมเดล Quant Data Science ระดับสถาบัน (คำนวณสดจากข้อมูล Hizeiris + TradingView):
-    1) 12h Realized Vol (RV) + GARCH(1,1) Forecast + Volatility Risk Premium (VRP = IV - RV)
-    2) 4-State Volatility Regime Quadrant (HIGH/LOW IV x +VRP/-VRP)
-    3) Implied Term Structure (0DTE vs Back DTE: Contango vs Backwardation)
-    4) Estimated Net Dealer GEX & Gamma Flip Level (โซนเขียว = เจ้ามือเบรกราคา | โซนแดง = เจ้ามือเร่งราคา)
+    ระบบ Quant Data Science 5 เสาหลักระดับสถาบัน (5-Pillar Confluence Engine -100 ถึง +100):
+    1) เสาที่ 1 — Gamma & Zero Flip (±20): Net Dealer GEX ($M/1% Move), Zero Gamma Flip, Pin Magnet
+    2) เสาที่ 2 — Vanna Flow (±20): คำนวณแรงบังคับ Hedge สัญญา GC ของเจ้ามือเมื่อ IV ยุบ -1% / พุ่ง +1% (Black-Scholes Vanna)
+    3) เสาที่ 3 — Charm Flow (±20): คำนวณแรงบังคับซื้อ–ขายจาก Time Decay รายชั่วโมง (GC/h) และทั้งเซสชัน (Black-Scholes Charm)
+    4) เสาที่ 4 — 25D Risk Reversal, 25D Butterfly & Parallel Repricing (ΔSurface) vs Sticky-Strike Skew Drift (±20)
+    5) เสาที่ 5 — Intraday Flow & Volatility Risk Premium (VRP = IV - 12h RV) + GARCH(1,1) + 4-State Quadrant + Term Structure (±20)
+    พร้อมคำนวณ 2D Price x IV Stress Scenarios (-$50 / +$50)
     """
     spot = float(exact_calc["spot"])
     open_spot = float(exact_calc["open_spot"])
     ws = exact_calc["walls_spot"]
+    mvc = exact_calc["morning_vs_current"]
+    skew_info = mvc.get("skew_dte_info", {})
     atm_iv = max(float(snap.atm_iv), 5.0)
+    sigma = atm_iv / 100.0
+    T = max(float(snap.dte) / 365.0, 0.02 / 365.0)
+    sqrt_T = math.sqrt(T)
+    fut_px = max(float(snap.futures_price), spot)
 
-    # --- 1) 12h Realized Vol (RV) & GARCH(1,1) ---
+    # --- A) 12h Realized Vol (RV) & GARCH(1,1) & VRP ---
     spots_seq = [float(r.get("spot", 0.0)) for r in round_history[-24:] if float(r.get("spot", 0.0)) > 1000.0]
     if not spots_seq or abs(spots_seq[-1] - spot) > 0.01:
         spots_seq.append(spot)
@@ -3863,13 +3875,11 @@ def compute_institutional_quant_models(
         if spots_seq[i - 1] > 0 and spots_seq[i] > 0:
             log_rets.append(math.log(spots_seq[i] / spots_seq[i - 1]))
 
-    # แปลงเป็น Annualized RV (สมมติเฉลี่ยรอบละ 30 นาที = 48 รอบ/วัน * 252 วัน = 12,096 ช่วง/ปี)
     periods_per_year = 12096.0
     if len(log_rets) >= 3:
         mean_r = sum(log_rets) / len(log_rets)
         var_step = sum((r - mean_r) ** 2 for r in log_rets) / max(len(log_rets) - 1, 1)
         rv_12h = round(math.sqrt(max(var_step, 1e-12) * periods_per_year) * 100.0, 2)
-        # ป้องกันกรณีราคาทดสอบนิ่ง 0% (เช่น Dry Run) ให้ยึดระยะวิ่งจากราคาเปิดแทน
         if rv_12h < 4.0:
             day_ret = abs(math.log(max(spot, 1.0) / max(open_spot, 1.0)))
             rv_12h = round(max(day_ret * math.sqrt(252.0) * 100.0, atm_iv * 0.78), 2)
@@ -3878,25 +3888,23 @@ def compute_institutional_quant_models(
         rv_12h = round(max(day_ret * math.sqrt(252.0) * 100.0, atm_iv * 0.82), 2)
     rv_12h = min(max(rv_12h, 5.0), 120.0)
 
-    # GARCH(1,1): sigma_t^2 = omega + alpha * r_{t-1}^2 + beta * sigma_{t-1}^2
     alpha, beta = 0.09, 0.88
-    long_run_var = ((atm_iv / 100.0) ** 2) / periods_per_year
+    long_run_var = (sigma ** 2) / periods_per_year
     omega = (1.0 - alpha - beta) * long_run_var
     garch_var = long_run_var
     for r in log_rets[-16:]:
         garch_var = omega + alpha * (r ** 2) + beta * garch_var
     garch_vol = round(min(max(math.sqrt(max(garch_var, 1e-12) * periods_per_year) * 100.0, 5.0), 120.0), 2)
-
     vrp = round(atm_iv - rv_12h, 2)
 
-    # --- 2) 4-State Volatility Regime Quadrant ---
+    # 4-State Volatility Regime Quadrant
     is_high_iv = atm_iv >= 22.0
     if is_high_iv and vrp >= 1.5:
         quadrant_code = "Q1: HIGH IV | +VRP"
         quadrant_desc = "ออปชันแพงเกินวิ่งจริง -> ได้เปรียบฝั่งดักสวน Mean Reversion (±2SD / กำแพง OI)"
     elif is_high_iv and vrp < 1.5:
         quadrant_code = "Q2: HIGH IV | -VRP"
-        quadrant_desc = "ตลาดวิ่งแรงกว่าที่ออปชันตีราคา -> ระวัง Breakout/Squeeze ห้ามรับมีดกลางทาง รอ IV หักหัวลง"
+        quadrant_desc = "ตลาดวิ่งแรงกว่าออปชัน -> ระวัง Breakout/Squeeze ห้ามรับมีด รอ IV หักหัวลง"
     elif (not is_high_iv) and vrp >= 0.0:
         quadrant_code = "Q3: LOW IV | +VRP"
         quadrant_desc = "ตลาดนิ่ง Positive Gamma Grind -> เคารพกรอบ ±1SD และกำแพง OI แม่นยำ"
@@ -3904,14 +3912,12 @@ def compute_institutional_quant_models(
         quadrant_code = "Q4: LOW IV | -VRP"
         quadrant_desc = "ออปชันถูกเกินจริง -> ระวัง Volatility Expansion ฉีกกรอบ ±1SD"
 
-    # --- 3) Implied Term Structure (0DTE vs Back DTE) ---
+    # --- B) Implied Term Structure ---
     term_rows = re.findall(
         r"((?:OG|G[0-9]|GC)[A-Z0-9]{2,5})\s+([0-9]+\.[0-9]+)\s+([0-9]+\.[0-9]+)",
         str(snap.cme_vol_series_text or ""),
     )
-    front_iv = atm_iv
-    back_iv = 0.0
-    back_label = ""
+    front_iv, back_iv, back_label = atm_iv, 0.0, ""
     if len(term_rows) >= 2:
         try:
             front_iv = float(term_rows[0][2])
@@ -3923,43 +3929,126 @@ def compute_institutional_quant_models(
     if back_iv > 5.0:
         term_spread = round(front_iv - back_iv, 2)
         if term_spread >= 1.5:
-            term_state = f"🔴 Backwardation (`0DTE {front_iv:.1f}% > {back_label} {back_iv:.1f}%`, `{term_spread:+.2f}%` -> ตื่นตระหนกระยะสั้น/รอ IV Crush)"
+            term_state = f"🔴 Backwardation (`0DTE {front_iv:.1f}% > {back_label} {back_iv:.1f}%`, `{term_spread:+.2f}%`)"
             term_short = f"Backwardation ({term_spread:+.1f}%)"
         elif term_spread <= -1.0:
-            term_state = f"🟢 Contango (`0DTE {front_iv:.1f}% < {back_label} {back_iv:.1f}%`, `{term_spread:+.2f}%` -> โครงสร้างปกติเคารพกรอบ 0.8)"
+            term_state = f"🟢 Contango (`0DTE {front_iv:.1f}% < {back_label} {back_iv:.1f}%`, `{term_spread:+.2f}%`)"
             term_short = f"Contango ({term_spread:+.1f}%)"
         else:
-            term_state = f"⚪ Flat (`0DTE {front_iv:.1f}% vs {back_label} {back_iv:.1f}%`, `{term_spread:+.2f}%` -> สมดุล)"
+            term_state = f"⚪ Flat (`0DTE {front_iv:.1f}% vs {back_label} {back_iv:.1f}%`, `{term_spread:+.2f}%`)"
             term_short = f"Flat ({term_spread:+.1f}%)"
     else:
         term_spread = 0.0
         term_state = f"⚪ Single-Series (`0DTE {front_iv:.1f}%`)"
         term_short = f"0DTE {front_iv:.1f}%"
 
-    # --- 4) Net Dealer GEX & Gamma Flip Level ---
+    # --- C) Pillar 1: Net Dealer GEX ($M / 1% Move) & Zero Gamma Flip ---
     pw = float(ws["put_wall_spot"])
     cw = float(ws["call_wall_spot"])
     mp = float(ws["max_pain_spot"])
     tot_oi = max(snap.oi_c + snap.oi_p, 1)
     put_share = snap.oi_p / float(tot_oi)
-    # Gamma Flip คือจุดสมดุลระหว่าง Put Wall กับ Call Wall ถ่วงน้ำหนักด้วยสัดส่วน OI + Max Pain
     raw_flip = pw + (cw - pw) * min(max(put_share, 0.25), 0.75)
     gamma_flip = round((raw_flip * 0.65) + (mp * 0.35), 2)
     dist_flip = round(spot - gamma_flip, 2)
 
-    # ประเมินโซนเขียว (+GEX เจ้ามือเบรกราคา) vs โซนแดง (-GEX เจ้ามือเร่งราคา)
+    # Standard Institutional Model (+Call / -Put Dealer Positioning):
+    # Gamma per contract (100 oz GC) at Put Wall & Call Wall
+    def _strike_gamma_vanna_charm(K: float) -> Tuple[float, float, float]:
+        if K <= 100.0 or fut_px <= 100.0:
+            return 0.0, 0.0, 0.0
+        d1 = (math.log(fut_px / K) + 0.5 * sigma * sigma * T) / (sigma * sqrt_T)
+        d2 = d1 - sigma * sqrt_T
+        pdf = _bs_norm_pdf(d1)
+        gamma = pdf / (fut_px * sigma * sqrt_T)
+        # Vanna = -pdf(d1) * d2 / sigma (per 1.0 vol -> multiply by 0.01 for 1% IV move)
+        vanna_1pct = (-pdf * d2 / sigma) * 0.01
+        # Charm = -pdf(d1) * (-d2 / (2*T)) per year -> per 1 hour (/ 8760)
+        charm_1h = (pdf * d2 / (2.0 * T)) / 8760.0
+        return gamma, vanna_1pct, charm_1h
+
+    g_call, van_call, ch_call = _strike_gamma_vanna_charm(float(snap.call_wall))
+    g_put, van_put, ch_put = _strike_gamma_vanna_charm(float(snap.put_wall))
+    # Net GEX ($M per 1% Gold move) = (Call_OI * g_call - Put_OI * g_put) * 100 oz * (0.01 * S^2) / 1e6
+    gex_scale = 100.0 * 0.01 * (fut_px ** 2) / 1e6
+    net_gex_m = round((snap.oi_c * g_call - snap.oi_p * g_put) * gex_scale, 2)
+    # ถ้า Spot สูงกว่า Flip และ net_gex_m แผ่ว ให้คงเครื่องหมายตามโครงสร้างจริง
     if spot >= gamma_flip and snap.vol_chg < 1.2 and vrp >= 0.0:
         gex_zone = "🟢 โซนเขียว (+GEX เจ้ามือเบรกราคา)"
-        gex_short = f"+GEX เขียว (Flip {gamma_flip:,.1f})"
+        gex_short = f"+GEX {net_gex_m:+.1f}$M (Flip {gamma_flip:,.1f})"
         gex_regime = "POSITIVE_GEX"
     elif spot < gamma_flip and (snap.vol_chg >= 0.8 or vrp < 0.0 or snap.oi_pc >= 1.2):
         gex_zone = "🔴 โซนแดง (-GEX เจ้ามือเร่งราคา)"
-        gex_short = f"-GEX แดง (Flip {gamma_flip:,.1f})"
+        gex_short = f"-GEX {net_gex_m:+.1f}$M (Flip {gamma_flip:,.1f})"
         gex_regime = "NEGATIVE_GEX"
     else:
         gex_zone = "🟡 โซนเปลี่ยนผ่านใกล้ Gamma Flip"
-        gex_short = f"~GEX กลาง (Flip {gamma_flip:,.1f})"
+        gex_short = f"~GEX {net_gex_m:+.1f}$M (Flip {gamma_flip:,.1f})"
         gex_regime = "NEUTRAL_GEX"
+
+    # --- D) Pillar 2 & 3: Vanna & Charm Forced Dealer Hedging (GC Contracts & $M Notional) ---
+    # When IV crushes (-1% IV), ΔDelta = -vanna_1pct -> Dealer hedge = +(Call_OI * (-van_call) - Put_OI * (-van_put))
+    vanna_crush_gc = round((snap.oi_c * (-van_call) - snap.oi_p * (-van_put)), 1)
+    vanna_crush_gc = max(min(vanna_crush_gc, 500.0), -500.0)
+    vanna_notional_m = round(vanna_crush_gc * 100.0 * fut_px / 1e6, 2)
+
+    charm_1h_gc = round((snap.oi_c * ch_call - snap.oi_p * ch_put), 1)
+    charm_1h_gc = max(min(charm_1h_gc, 250.0), -250.0)
+    rem_hours = max(min(float(snap.dte) * 24.0, 20.0), 1.0)
+    charm_session_gc = round(charm_1h_gc * rem_hours, 1)
+
+    # 2D Price x IV Stress Scenarios (+1h Forward, GC Contracts) for ΔPrice = -50 and +50
+    # Forced Dealer Hedge ≈ -Net_GEX_contracts * (ΔP / (0.01*S)) + Vanna(-1% IV) + Charm(+1h)
+    gex_gc_per_1pct = (net_gex_m * 1e6) / max(100.0 * fut_px, 1.0)
+    stress_down50_gc = round(-gex_gc_per_1pct * (-50.0 / (0.01 * fut_px)) + vanna_crush_gc + charm_1h_gc, 0)
+    stress_up50_gc = round(-gex_gc_per_1pct * (50.0 / (0.01 * fut_px)) + vanna_crush_gc + charm_1h_gc, 0)
+
+    # --- E) Pillar 4: 25D Risk Reversal, 25D Butterfly & Parallel Repricing vs Sticky-Strike Drift ---
+    p_wing = float(str(skew_info.get("put_w_live", f"{atm_iv + 3.0}%")).replace("%", "") or atm_iv + 3.0)
+    c_wing = float(str(skew_info.get("call_w_live", f"{atm_iv + 3.0}%")).replace("%", "") or atm_iv + 3.0)
+    rr_25d = round(c_wing - p_wing, 2)  # Call - Put (- = Put Skew, + = Call Skew)
+    bf_25d = round(((p_wing + c_wing) / 2.0) - atm_iv, 2)  # Tail Curvature
+    # แยก Total Vol Chg = Parallel Vol Repricing (ΔSurface) + Sticky-Strike Skew Drift
+    # ประมาณ Skew Drift จากการขยับของ Futures เทียบราคาเปิด * ความชัน Skew
+    z_move = float(exact_calc["current_sd_zone"].get("sd_ratio", 0.0))
+    skew_drift = round(max(min(-z_move * 0.25 * (rr_25d / 3.0), 2.5), -2.5), 2)
+    parallel_repricing = round(float(snap.vol_chg) - skew_drift, 2)
+
+    # --- F) 5-Pillar Confluence Scorecard (-100 to +100, each pillar ±20) ---
+    # Pillar 1: Gamma & Zero Flip (+ = Bullish Pull Up to Magnet / Positive Gamma Support, - = Bearish Negative Gamma)
+    p1_score = 0
+    if gex_regime == "POSITIVE_GEX":
+        p1_score = 14 if mp >= spot else -8
+    elif gex_regime == "NEGATIVE_GEX":
+        p1_score = -16 if spot < gamma_flip else -10
+    else:
+        p1_score = 6 if mp >= spot else -6
+    p1_score = max(-20, min(20, p1_score))
+
+    # Pillar 2: Vanna Flow
+    p2_score = max(-20, min(20, int(round(vanna_crush_gc / 4.0)))) if snap.vol_chg <= 0 else max(-20, min(20, int(round(-vanna_crush_gc / 4.0))))
+
+    # Pillar 3: Charm Flow
+    p3_score = max(-20, min(20, int(round(charm_1h_gc / 3.0))))
+
+    # Pillar 4: 25D RR & Parallel Repricing
+    p4_score = max(-20, min(20, int(round(rr_25d * 2.5 - parallel_repricing * 2.0))))
+
+    # Pillar 5: Intraday Flow & VRP
+    call_ratio = snap.intraday_c / float(max(snap.intraday_c + snap.intraday_p, 1))
+    flow_pts = int(round((call_ratio - 0.50) * 30.0))
+    vrp_pts = 4 if vrp >= 2.0 else (-4 if vrp < 0 else 0)
+    p5_score = max(-20, min(20, flow_pts + vrp_pts))
+
+    confluence_score = max(-100, min(100, p1_score + p2_score + p3_score + p4_score + p5_score))
+    confidence_pct = min(92, max(25, int(round(30 + abs(confluence_score) * 0.65))))
+
+    if confluence_score >= 20:
+        signal_bias = "🟢 BUY · FADE SUPPORT" if gex_regime == "POSITIVE_GEX" else "🟢 BULLISH BIAS"
+    elif confluence_score <= -20:
+        signal_bias = "🔴 SELL · FADE RESISTANCE" if gex_regime == "POSITIVE_GEX" else "🔴 BEARISH SQUEEZE RISK"
+    else:
+        signal_bias = "🟡 NEUTRAL · PLAY EDGES"
 
     return {
         "rv_12h": rv_12h,
@@ -3970,11 +4059,30 @@ def compute_institutional_quant_models(
         "term_spread": term_spread,
         "term_state": term_state,
         "term_short": term_short,
+        "net_gex_m": net_gex_m,
         "gamma_flip": gamma_flip,
         "dist_flip": dist_flip,
         "gex_zone": gex_zone,
         "gex_short": gex_short,
         "gex_regime": gex_regime,
+        "vanna_crush_gc": vanna_crush_gc,
+        "vanna_notional_m": vanna_notional_m,
+        "charm_1h_gc": charm_1h_gc,
+        "charm_session_gc": charm_session_gc,
+        "stress_down50_gc": int(stress_down50_gc),
+        "stress_up50_gc": int(stress_up50_gc),
+        "rr_25d": rr_25d,
+        "bf_25d": bf_25d,
+        "parallel_repricing": parallel_repricing,
+        "skew_drift": skew_drift,
+        "p1_score": p1_score,
+        "p2_score": p2_score,
+        "p3_score": p3_score,
+        "p4_score": p4_score,
+        "p5_score": p5_score,
+        "confluence_score": confluence_score,
+        "confidence_pct": confidence_pct,
+        "signal_bias": signal_bias,
     }
 
 
@@ -4332,11 +4440,12 @@ def build_clean_section_messages(
         f"   • {skew_info['skew_direction']}\n"
         f"   • Put Wing `{skew_info['put_w_live']}` | ATM `{snap.atm_iv:.2f}%` (`Vol Chg {snap.vol_chg:+.2f}%`) | Call Wing `{skew_info['call_w_live']}`\n"
         f"   • กฎเวลา 0DTE: {m4['eod_warning']}\n{vol_exp_m2_line}"
-        f"4️⃣ *โมเดล Quant สถาบัน (VRP · GARCH · Term Structure · Net GEX)*:\n"
-        f"   • *Volatility Risk Premium*: `ATM IV {snap.atm_iv:.2f}%` vs `12h RV {iq['rv_12h']:.2f}%` | `GARCH(1,1) {iq['garch_vol']:.2f}%` -> *VRP = `{iq['vrp']:+.2f}%`*\n"
-        f"   • *4-State Quadrant*: `{iq['quadrant_code']}` — _{iq['quadrant_desc']}_\n"
-        f"   • *Term Structure*: {iq['term_state']}\n"
-        f"   • *Net Dealer GEX*: {iq['gex_zone']} (เส้น `Gamma Flip = {iq['gamma_flip']:,.2f}`, ห่าง `{iq['dist_flip']:+.2f}` จุด)\n"
+        f"4️⃣ *5-Pillar Institutional Confluence (`Score {iq['confluence_score']:+d}/100` | `Conf {iq['confidence_pct']}%` | {iq['signal_bias']})*:\n"
+        f"   • *P1 Gamma & Flip (`{iq['p1_score']:+d}/20`)*: {iq['gex_zone']} (`Net GEX {iq['net_gex_m']:+.2f}$M/1%` | `Flip {iq['gamma_flip']:,.2f}`, ห่าง `{iq['dist_flip']:+.1f}`)\n"
+        f"   • *P2 Vanna (`{iq['p2_score']:+d}/20`)*: IV Crush `-1%` บังคับ Hedge `{iq['vanna_crush_gc']:+.1f} GC` (`{iq['vanna_notional_m']:+.2f}$M`) | *P3 Charm (`{iq['p3_score']:+d}/20`)*: `{iq['charm_1h_gc']:+.1f} GC/h` (ทั้งวัน `{iq['charm_session_gc']:+.0f} GC`)\n"
+        f"   • *P4 25D RR & Surface (`{iq['p4_score']:+d}/20`)*: `25D RR {iq['rr_25d']:+.2f}%` | `BF {iq['bf_25d']:+.2f}%` | `ΔSurface {iq['parallel_repricing']:+.2f}%` vs `Drift {iq['skew_drift']:+.2f}%`\n"
+        f"   • *P5 Flow & VRP (`{iq['p5_score']:+d}/20`)*: `IV {snap.atm_iv:.1f}%` vs `12h RV {iq['rv_12h']:.1f}%` (`GARCH {iq['garch_vol']:.1f}%`) -> *VRP `{iq['vrp']:+.2f}%`* (`{iq['quadrant_code']}`)\n"
+        f"   • *Term Structure*: {iq['term_state']} | *2D Stress (+1h)*: ลง `-50` เจ้ามือ `{iq['stress_down50_gc']:+d} GC` / ขึ้น `+50` เจ้ามือ `{iq['stress_up50_gc']:+d} GC`\n"
         f"   • *Verified Win Rate*: {led['summary_str']}\n\n"
         f"5️⃣ *บันทึกสถานะ First Touch วันนี้*: {touched_str}"
     )
@@ -4425,9 +4534,11 @@ def _build_institutional_deterministic_verdict(
     vrp_val = float(iq["vrp"])
     vrp_read = "ออปชันแพงเกินวิ่งจริง (+VRP หนุนการดักสวน Mean Reversion)" if vrp_val >= 1.0 else "ตลาดวิ่งแรงกว่าที่ออปชันตีราคา (-VRP ห้ามรับมีดกลางทาง)"
     return (
-        f"โหมดตลาด `{iq['quadrant_code']}` | {iq['gex_zone']} (Flip `{iq['gamma_flip']:,.2f}`) | "
-        f"`VRP {vrp_val:+.2f}%` ({vrp_read}) | {skew_dir} -> "
-        f"ให้ยึดกฎ First Touch เฉพาะด่านสดใหม่และคุมความเสี่ยง SL 8 จุดตามกรอบวิจัยอย่างเคร่งครัด"
+        f"*5-Pillar Score `{iq['confluence_score']:+d}/100` (Conf `{iq['confidence_pct']}%`, {iq['signal_bias']})*: "
+        f"โหมด `{iq['quadrant_code']}` | {iq['gex_zone']} (`Net GEX {iq['net_gex_m']:+.1f}$M`, Flip `{iq['gamma_flip']:,.2f}`) | "
+        f"Vanna `-1% IV` = `{iq['vanna_crush_gc']:+.1f} GC`, Charm = `{iq['charm_1h_gc']:+.1f} GC/h` | "
+        f"`VRP {vrp_val:+.2f}%` ({vrp_read}) | `25D RR {iq['rr_25d']:+.2f}%` (`ΔSurface {iq['parallel_repricing']:+.2f}%` vs `Drift {iq['skew_drift']:+.2f}%`) -> "
+        f"ยึดกฎ First Touch เฉพาะด่านสดใหม่และคุม SL 8 จุดตามกรอบวิจัยอย่างเคร่งครัด"
     )
 
 
@@ -4460,7 +4571,9 @@ def synthesize_full_report_messages(
         "- บรรทัด 3: ฟันธงกลยุทธ์ที่เหมาะสมที่สุดในรอบนี้ภายใต้กฎ First Touch Only (ระบุชัดว่าด่านไหนควรรอ หรือห้ามรับมีด)\n\n"
         f"Spot: {exact_calc['spot']:.2f} | Open: {exact_calc['open_spot']:.2f} ({mvc['z_from_open']}) | DTE: {snap.dte:.2f}\n"
         f"VRP: {iq['vrp']:+.2f}% (ATM IV {snap.atm_iv:.2f}% vs 12h RV {iq['rv_12h']:.2f}%, GARCH {iq['garch_vol']:.2f}%) | Quadrant: {iq['quadrant_code']}\n"
-        f"Term Structure: {iq['term_short']} | Net Dealer GEX: {iq['gex_zone']} (Gamma Flip {iq['gamma_flip']:.2f})\n"
+        f"5-Pillar Confluence Score: {iq['confluence_score']:+d}/100 (Conf {iq['confidence_pct']}%, {iq['signal_bias']}) | P1:{iq['p1_score']:+d} P2:{iq['p2_score']:+d} P3:{iq['p3_score']:+d} P4:{iq['p4_score']:+d} P5:{iq['p5_score']:+d}\n"
+        f"Vanna(-1% IV): {iq['vanna_crush_gc']:+.1f} GC ({iq['vanna_notional_m']:+.2f}$M) | Charm(+1h): {iq['charm_1h_gc']:+.1f} GC/h | 25D RR: {iq['rr_25d']:+.2f}% (dSurface {iq['parallel_repricing']:+.2f}% vs Drift {iq['skew_drift']:+.2f}%)\n"
+        f"Term Structure: {iq['term_short']} | Net Dealer GEX: {iq['gex_zone']} ({iq['net_gex_m']:+.2f}$M/1%, Gamma Flip {iq['gamma_flip']:.2f})\n"
         f"Walls: PutWall {ws['put_wall_spot']:.2f} | MaxPain {ws['max_pain_spot']:.2f} | CallWall {ws['call_wall_spot']:.2f}\n"
         f"1SD: {tb['buy_1sd']:.2f}/{tb['sell_1sd']:.2f} | 2SD: {tb['buy_2sd']:.2f}/{tb['sell_2sd']:.2f}"
     )
