@@ -3542,6 +3542,333 @@ def render_final_plan_summary_image(
     return None
 
 
+def render_institutional_dealer_dashboard_image(
+    snap: HizeirisSnapshot,
+    exact_calc: Dict,
+    iq: Dict[str, object],
+    signal_ledger: Optional[Dict[str, object]] = None,
+    out_path_override: Optional[str] = None,
+) -> Optional[Tuple[str, str]]:
+    """
+    [ภาพที่ 6] แผงวิเคราะห์เจ้ามือระดับสถาบัน (Institutional Dealer Flow & 2D Stress Matrix):
+    1) Header: 5-Pillar Confluence Gauge (-100..+100) + 3 โหมดสมมติฐานเจ้ามือ (Standard / Short Wings / Gold Rally)
+    2) Left Panel: กราฟเส้นโค้ง Net Dealer GEX ($M/1% Move) เขียว-แดง + เส้น Put Wall / Zero Flip / Futures / Pin Magnet / Call Wall
+    3) Right Panel: ตารางความร้อน 2D Price x IV Forced Hedge Matrix (+1h Forward) เต็ม 7x5 ช่อง
+    4) Bottom Panel: ตาราง Strike-Level Greek-Weighted Matrix (±150 pts) พร้อม Dollar Delta ($M) และ Role Tag
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        font_cache = {}
+
+        def _get_font(is_thai: bool, bold: bool, sz: int):
+            key = (is_thai, bold, sz)
+            if key in font_cache:
+                return font_cache[key]
+            if is_thai:
+                paths = (
+                    [
+                        "/usr/share/fonts/truetype/noto/NotoSansThai-Bold.ttf",
+                        "/usr/share/fonts/truetype/noto/NotoLoopedThai-Bold.ttf",
+                        "/usr/share/fonts/opentype/tlwg/Loma-Bold.otf",
+                        "/usr/share/fonts/truetype/tlwg/Loma-Bold.ttf",
+                    ]
+                    if bold
+                    else [
+                        "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+                        "/usr/share/fonts/truetype/noto/NotoLoopedThai-Regular.ttf",
+                        "/usr/share/fonts/opentype/tlwg/Loma.otf",
+                        "/usr/share/fonts/truetype/tlwg/Loma.ttf",
+                    ]
+                )
+            else:
+                paths = (
+                    [
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                        "/usr/share/fonts/opentype/tlwg/Loma-Bold.otf",
+                    ]
+                    if bold
+                    else [
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                        "/usr/share/fonts/opentype/tlwg/Loma.otf",
+                    ]
+                )
+            for p in paths:
+                if os.path.exists(p):
+                    try:
+                        f_obj = ImageFont.truetype(p, sz)
+                        font_cache[key] = f_obj
+                        return f_obj
+                    except Exception:
+                        pass
+            f_obj = ImageFont.load_default()
+            font_cache[key] = f_obj
+            return f_obj
+
+        def _draw_txt(draw_obj, xy, text: str, sz: int = 14, bold: bool = False, fill=(255, 255, 255)):
+            x, y = float(xy[0]), float(xy[1])
+            clean = re.sub(r"[\r\n\t]+", " ", str(text).replace("•", "-").replace("–", "-"))
+            clean = re.sub(r"[^\u0E00-\u0E7Fa-zA-Z0-9 \.\,\:\;\-\+\/\(\)\[\]\%\$\!\?\&\=\<\>\|]", "", clean)
+            runs = re.findall(r"[\u0E00-\u0E7F]+|[^\u0E00-\u0E7F]+", clean)
+            for run in runs:
+                is_th = bool(re.match(r"^[\u0E00-\u0E7F]", run))
+                f_use = _get_font(is_th, bold, sz)
+                y_offset = -1 if is_th else 0
+                draw_obj.text((x, y + y_offset), run, font=f_use, fill=fill)
+                try:
+                    w_run = draw_obj.textlength(run, font=f_use)
+                except Exception:
+                    bbox = draw_obj.textbbox((0, 0), run, font=f_use)
+                    w_run = bbox[2] - bbox[0]
+                x += w_run
+
+        W, H = 1600, 1180
+        img = Image.new("RGB", (W, H), (7, 11, 16))
+        draw = ImageDraw.Draw(img)
+
+        fut_px = max(float(snap.futures_price), float(exact_calc["spot"]))
+        spot = float(exact_calc["spot"])
+        dm = iq.get("dealer_models", {})
+        led = signal_ledger or {"summary_str": "กำลังเก็บสถิติจริง"}
+
+        # --- 1. TOP HEADER & 5-PILLAR GAUGE ---
+        draw.rounded_rectangle([20, 16, 1580, 142], radius=10, fill=(13, 21, 32), outline=(45, 70, 55), width=2)
+        draw.rectangle([20, 16, 28, 142], fill=(132, 204, 22))
+        _draw_txt(draw, (42, 24), "แผงวิเคราะห์เจ้ามือระดับสถาบัน (Institutional Dealer Flow, GEX Curve & 2D Stress Matrix)", sz=21, bold=True, fill=(163, 230, 53))
+        _draw_txt(
+            draw,
+            (42, 56),
+            f"{snap.contract_name} | Futures {fut_px:,.1f} (Spot {spot:,.2f}) | DTE {snap.dte:.2f} | IV {snap.atm_iv:.2f}% | VRP {iq['vrp']:+.2f}% | {iq['quadrant_code']}",
+            sz=14, bold=False, fill=(203, 213, 225),
+        )
+
+        # 3 Dealer Positioning Models Strip
+        m_keys = [("standard", (22, 101, 52)), ("short_wings", (51, 65, 85)), ("gold_rally", (51, 65, 85))]
+        mx = 42
+        for mk, mcol in m_keys:
+            mobj = dm.get(mk, {})
+            short_lbl = str(mobj.get('label', mk)).replace("Standard", "Std").replace("Short Wings", "ShortWing").replace("Gold Rally", "GoldRally")
+            mlbl = f"{short_lbl}: GEX {float(mobj.get('net_gex_m', 0)):+.1f}$M | Van {float(mobj.get('vanna_gc', 0)):+.0f} | Chm {float(mobj.get('charm_gc', 0)):+.0f}/h"
+            mw = 365
+            draw.rounded_rectangle([mx, 88, mx + mw, 128], radius=7, fill=(17, 29, 44), outline=mcol, width=2 if mk == "standard" else 1)
+            _draw_txt(draw, (mx + 10, 100), mlbl, sz=11, bold=(mk == "standard"), fill=(190, 242, 100) if mk == "standard" else (203, 213, 225))
+            mx += mw + 10
+
+        # Confluence Gauge Box (Right side of Header)
+        c_score = int(iq.get("confluence_score", 0))
+        c_conf = int(iq.get("confidence_pct", 50))
+        draw.rounded_rectangle([1185, 24, 1566, 132], radius=8, fill=(10, 18, 28), outline=(74, 222, 128) if c_score >= 20 else ((248, 113, 113) if c_score <= -20 else (250, 204, 21)), width=2)
+        _draw_txt(draw, (1200, 32), f"5-PILLAR SCORE: {c_score:+d}/100  (Conf {c_conf}%)", sz=15, bold=True, fill=(254, 240, 138))
+        _draw_txt(draw, (1200, 56), f"{iq.get('signal_bias', 'NEUTRAL')}", sz=13, bold=True, fill=(134, 239, 172) if c_score >= 20 else ((252, 165, 165) if c_score <= -20 else (253, 224, 71)))
+        # Gauge bar
+        gx0, gx1, gy = 1200, 1550, 92
+        draw.rounded_rectangle([gx0, gy, gx1, gy + 12], radius=6, fill=(30, 41, 59))
+        mid_gx = (gx0 + gx1) // 2
+        draw.rectangle([gx0, gy, mid_gx, gy + 12], fill=(153, 27, 27))
+        draw.rectangle([mid_gx, gy, gx1, gy + 12], fill=(22, 101, 52))
+        marker_x = int(gx0 + ((c_score + 100) / 200.0) * (gx1 - gx0))
+        draw.rounded_rectangle([marker_x - 4, gy - 5, marker_x + 4, gy + 17], radius=3, fill=(255, 255, 255))
+        _draw_txt(draw, (gx0, gy + 18), f"P1:{iq['p1_score']:+d}  P2:{iq['p2_score']:+d}  P3:{iq['p3_score']:+d}  P4:{iq['p4_score']:+d}  P5:{iq['p5_score']:+d}", sz=11, bold=False, fill=(148, 163, 184))
+
+        # --- 2. LEFT PANEL: NET DEALER GEX CURVE ($M / 1% Move vs Gold Price) ---
+        lx0, ly0, lx1, ly1 = 20, 156, 790, 650
+        draw.rounded_rectangle([lx0, ly0, lx1, ly1], radius=10, fill=(13, 21, 32), outline=(30, 48, 60), width=2)
+        _draw_txt(draw, (lx0 + 16, ly0 + 14), "1) กราฟ Net Dealer GEX ($M / 1% Move) vs Gold Futures", sz=16, bold=True, fill=(163, 230, 53))
+        _draw_txt(draw, (lx0 + 16, ly0 + 40), "+ เขียว = เจ้ามือเบรกราคา (Positive Gamma Pinning) | - แดง = เจ้ามือเร่งราคา (Negative Gamma)", sz=12, bold=False, fill=(148, 163, 184))
+
+        # Plot Area
+        px0, py0, px1, py1 = lx0 + 68, ly0 + 82, lx1 - 24, ly1 - 56
+        draw.rectangle([px0, py0, px1, py1], fill=(9, 14, 22), outline=(30, 41, 59), width=1)
+        curve = iq.get("gex_curve", [])
+        if len(curve) >= 2:
+            xs_c = [float(p[0]) for p in curve]
+            ys_c = [float(p[1]) for p in curve]
+            xmin, xmax = min(xs_c), max(xs_c)
+            ymax_abs = max(max(abs(y) for y in ys_c), 10.0) * 1.18
+            ymin, ymax = -ymax_abs, ymax_abs
+
+            def _map_x(xv: float) -> int:
+                return int(px0 + (xv - xmin) / max(xmax - xmin, 1.0) * (px1 - px0))
+
+            def _map_y(yv: float) -> int:
+                return int(py1 - (yv - ymin) / max(ymax - ymin, 1.0) * (py1 - py0))
+
+            y_zero = _map_y(0.0)
+            # Horizontal grid lines
+            for frac in [-0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75]:
+                yv = ymax * frac
+                yy = _map_y(yv)
+                col_g = (100, 116, 139) if frac == 0.0 else (24, 34, 48)
+                draw.line([(px0, yy), (px1, yy)], fill=col_g, width=2 if frac == 0.0 else 1)
+                if frac in (-0.5, 0.0, 0.5):
+                    _draw_txt(draw, (lx0 + 12, yy - 7), f"{yv:+.0f}", sz=11, bold=(frac == 0.0), fill=(148, 163, 184))
+
+            # Shaded polygons (Green above 0, Red below 0) & curve line
+            pts_mapped = [(_map_x(xv), _map_y(yv), yv) for xv, yv in curve]
+            for i in range(len(pts_mapped) - 1):
+                ax, ay, av = pts_mapped[i]
+                bx, by, bv = pts_mapped[i + 1]
+                if av >= 0 and bv >= 0:
+                    draw.polygon([(ax, y_zero), (ax, ay), (bx, by), (bx, y_zero)], fill=(20, 68, 35))
+                    draw.line([(ax, ay), (bx, by)], fill=(132, 204, 22), width=3)
+                elif av <= 0 and bv <= 0:
+                    draw.polygon([(ax, y_zero), (ax, ay), (bx, by), (bx, y_zero)], fill=(88, 22, 28))
+                    draw.line([(ax, ay), (bx, by)], fill=(248, 113, 113), width=3)
+                else:
+                    # Crossing 0
+                    t0 = abs(av) / max(abs(av) + abs(bv), 1e-6)
+                    mx0 = int(ax + (bx - ax) * t0)
+                    if av >= 0:
+                        draw.polygon([(ax, y_zero), (ax, ay), (mx0, y_zero)], fill=(20, 68, 35))
+                        draw.polygon([(mx0, y_zero), (bx, by), (bx, y_zero)], fill=(88, 22, 28))
+                    else:
+                        draw.polygon([(ax, y_zero), (ax, ay), (mx0, y_zero)], fill=(88, 22, 28))
+                        draw.polygon([(mx0, y_zero), (bx, by), (bx, y_zero)], fill=(20, 68, 35))
+                    draw.line([(ax, ay), (bx, by)], fill=(250, 204, 21), width=3)
+
+            # Vertical key level lines
+            flip_fut = float(iq.get("flip_fut", fut_px))
+            v_lines = [
+                (float(snap.put_wall), f"P-Wall {snap.put_wall:,.0f}", (249, 115, 22), py0 + 8),
+                (flip_fut, f"Flip {flip_fut:,.1f}", (250, 204, 21), py0 + 26),
+                (fut_px, f"Fut {fut_px:,.1f}", (255, 255, 255), py0 + 44),
+                (float(snap.max_pain), f"Mag {snap.max_pain:,.0f}", (132, 204, 22), py0 + 62),
+                (float(snap.call_wall), f"C-Wall {snap.call_wall:,.0f}", (56, 189, 248), py0 + 80),
+            ]
+            for vx, vlbl, vcol, vly in v_lines:
+                if xmin <= vx <= xmax:
+                    xx = _map_x(vx)
+                    for yy_d in range(py0, py1, 10):
+                        draw.line([(xx, yy_d), (xx, min(yy_d + 5, py1))], fill=vcol, width=2 if vcol == (255, 255, 255) else 1)
+                    lbl_x = min(max(xx + 4, px0 + 4), px1 - 115)
+                    _draw_txt(draw, (lbl_x, vly), vlbl, sz=11, bold=True, fill=vcol)
+
+            # X-axis ticks
+            for i in range(5):
+                xv = xmin + (xmax - xmin) * (i / 4.0)
+                xx = _map_x(xv)
+                _draw_txt(draw, (xx - 20, py1 + 8), f"{xv:,.0f}", sz=11, bold=False, fill=(148, 163, 184))
+
+        _draw_txt(draw, (lx0 + 16, ly1 - 24), f"Net GEX ปัจจุบัน: {iq['net_gex_m']:+.2f} $M/1% | Zero Flip (Fut): {iq.get('flip_fut', fut_px):,.1f} | Verified Win Rate: {led['summary_str']}", sz=11, bold=True, fill=(203, 213, 225))
+
+        # --- 3. RIGHT PANEL: FULL 7x5 2D PRICE x IV FORCED HEDGE MATRIX (+1h Forward) ---
+        rx0, ry0, rx1, ry1 = 806, 156, 1580, 650
+        draw.rounded_rectangle([rx0, ry0, rx1, ry1], radius=10, fill=(13, 21, 32), outline=(30, 48, 60), width=2)
+        _draw_txt(draw, (rx0 + 16, ry0 + 14), "2) ตารางความร้อน 2D Price x IV Forced Hedge Matrix (+1h Forward)", sz=16, bold=True, fill=(163, 230, 53))
+        _draw_txt(draw, (rx0 + 16, ry0 + 40), "เขียว = เจ้ามือถูกบังคับซื้อคืน (พยุง/ดีด) | แดง = เจ้ามือถูกบังคับเทขาย (เบรก/เร่งลง)", sz=12, bold=False, fill=(148, 163, 184))
+
+        mat_rows = iq.get("stress_matrix_2d", [])
+        tx0, ty0 = rx0 + 16, ry0 + 74
+        col_w0 = 132
+        col_w = 122
+        row_h = 51
+
+        # Table header
+        headers = ["dPrice (Fut)", "-5% IV", "-2% IV", "0% IV", "+2% IV", "+5% IV"]
+        for ci, htxt in enumerate(headers):
+            cx = tx0 + (0 if ci == 0 else col_w0 + (ci - 1) * col_w)
+            cw_use = col_w0 if ci == 0 else col_w
+            draw.rectangle([cx, ty0, cx + cw_use - 2, ty0 + 34], fill=(20, 30, 45), outline=(45, 58, 78))
+            _draw_txt(draw, (cx + 12, ty0 + 9), htxt, sz=12, bold=True, fill=(163, 230, 53) if ci > 0 else (203, 213, 225))
+
+        for ri, rdata in enumerate(mat_rows):
+            ry_r = ty0 + 36 + ri * row_h
+            dp_v = int(rdata["dp"])
+            fut_v = int(rdata["fut"])
+            is_cur_row = (dp_v == 0)
+            draw.rectangle([tx0, ry_r, tx0 + col_w0 - 2, ry_r + row_h - 2], fill=(24, 36, 54) if is_cur_row else (15, 23, 36), outline=(51, 65, 85))
+            _draw_txt(draw, (tx0 + 8, ry_r + 16), f"{dp_v:+d} ({fut_v})", sz=12, bold=True, fill=(254, 240, 138) if is_cur_row else (226, 232, 240))
+
+            for ci, cell in enumerate(rdata["cells"]):
+                cx = tx0 + col_w0 + ci * col_w
+                gc_v = int(cell["gc"])
+                m_v = float(cell["m"])
+                # Intensity-graded green or red background
+                mag = min(abs(gc_v) / 350.0, 1.0)
+                if gc_v >= 0:
+                    c_bg = (int(16 + 10 * mag), int(48 + 75 * mag), int(28 + 18 * mag))
+                else:
+                    c_bg = (int(58 + 95 * mag), int(18 + 10 * mag), int(24 + 12 * mag))
+                is_center = is_cur_row and int(cell["div"]) == 0
+                draw.rectangle([cx, ry_r, cx + col_w - 2, ry_r + row_h - 2], fill=c_bg, outline=(163, 230, 53) if is_center else (30, 41, 59), width=3 if is_center else 1)
+                _draw_txt(draw, (cx + 12, ry_r + 8), f"{gc_v:+d} GC", sz=13, bold=True, fill=(255, 255, 255))
+                _draw_txt(draw, (cx + 12, ry_r + 28), f"{m_v:+.1f}$M", sz=11, bold=False, fill=(203, 213, 225))
+
+        # --- 4. BOTTOM PANEL: STRIKE-LEVEL GREEK-WEIGHTED MATRIX (±150 pts) ---
+        bx0, by0, bx1, by1 = 20, 666, 1580, 1160
+        draw.rounded_rectangle([bx0, by0, bx1, by1], radius=10, fill=(13, 21, 32), outline=(30, 48, 60), width=2)
+        _draw_txt(draw, (bx0 + 16, by0 + 14), "3) ตารางเจาะลึกราย Strike (Strike-Level Greek-Weighted Matrix & Dollar Delta +/-150 pts)", sz=16, bold=True, fill=(163, 230, 53))
+        _draw_txt(draw, (bx0 + 16, by0 + 40), "โครงสร้าง OI, IV %, Net GEX, Vanna (-1% IV), Charm (+1h) และ Dollar Delta ($M) ที่เจ้ามือถือป้องกันความเสี่ยงจริงในแต่ละด่าน", sz=12, bold=False, fill=(148, 163, 184))
+
+        s_cols = [
+            ("STRIKE", 130),
+            ("DIST", 115),
+            ("CALL OI", 135),
+            ("PUT OI", 135),
+            ("IV %", 115),
+            ("NET GEX ($M/1%)", 195),
+            ("VANNA (-1% GC)", 175),
+            ("CHARM (+1h GC)", 170),
+            ("DOLLAR DELTA ($M)", 190),
+            ("ROLE / FLOW TAG", 168),
+        ]
+        st_x0, st_y0 = bx0 + 16, by0 + 72
+        cur_x = st_x0
+        for cname, cw_c in s_cols:
+            draw.rectangle([cur_x, st_y0, cur_x + cw_c - 2, st_y0 + 36], fill=(20, 30, 45), outline=(45, 58, 78))
+            _draw_txt(draw, (cur_x + 10, st_y0 + 10), cname, sz=12, bold=True, fill=(163, 230, 53))
+            cur_x += cw_c
+
+        s_rows = iq.get("strike_matrix", [])[:7]
+        s_rh = 52
+        for idx_s, sr in enumerate(s_rows):
+            sy = st_y0 + 38 + idx_s * s_rh
+            row_bg = (16, 26, 40) if idx_s % 2 == 0 else (11, 18, 29)
+            rtag = str(sr.get("role_tag", "--"))
+            if rtag == "ATM":
+                row_bg = (28, 34, 48)
+            vals = [
+                (f"{sr['strike']}", (255, 255, 255), True),
+                (f"{sr['dist']:+.1f}", (134, 239, 172) if sr["dist"] >= 0 else (252, 165, 165), False),
+                (f"{sr['call_oi']:,}", (56, 189, 248), False),
+                (f"{sr['put_oi']:,}", (251, 191, 36), False),
+                (f"{sr['iv_pct']:.2f}%", (226, 232, 240), False),
+                (f"{sr['net_gex_m']:+.2f}", (134, 239, 172) if sr["net_gex_m"] >= 0 else (248, 113, 113), True),
+                (f"{sr['vanna_gc']:+.1f}", (134, 239, 172) if sr["vanna_gc"] >= 0 else (248, 113, 113), False),
+                (f"{sr['charm_gc']:+.1f}", (134, 239, 172) if sr["charm_gc"] >= 0 else (248, 113, 113), False),
+                (f"{sr['dollar_delta_m']:+.2f}$M", (254, 240, 138) if abs(float(sr["dollar_delta_m"])) >= 25.0 else (226, 232, 240), True),
+                (rtag, (255, 255, 255), True),
+            ]
+            cur_x = st_x0
+            for ci, ((vtxt, vcol, vbold), (_, cw_c)) in enumerate(zip(vals, s_cols)):
+                draw.rectangle([cur_x, sy, cur_x + cw_c - 2, sy + s_rh - 2], fill=row_bg, outline=(30, 41, 59))
+                if ci == len(s_cols) - 1:
+                    pill_bg = (
+                        (180, 83, 9) if rtag == "PUT WALL" else (
+                        (3, 105, 161) if rtag == "CALL WALL" else (
+                        (21, 128, 61) if rtag in ("PIN MAGNET", "+GEX ZONE") else (
+                        (153, 27, 27) if rtag == "-GEX ZONE" else (71, 85, 105))))
+                    )
+                    draw.rounded_rectangle([cur_x + 12, sy + 11, cur_x + cw_c - 14, sy + s_rh - 11], radius=12, fill=pill_bg)
+                    _draw_txt(draw, (cur_x + 24, sy + 18), vtxt, sz=11, bold=True, fill=(255, 255, 255))
+                else:
+                    _draw_txt(draw, (cur_x + 12, sy + 17), vtxt, sz=13, bold=vbold, fill=vcol)
+                cur_x += cw_c
+
+        out_path = out_path_override or f"/tmp/hizeiris_6_institutional_dashboard_{now_th().strftime('%H%M%S')}.png"
+        img.save(out_path, format="PNG", optimize=True)
+        caption = (
+            f"🏛️ *[ภาพที่ 6] แผงวิเคราะห์เจ้ามือระดับสถาบัน (GEX Curve + 2D Stress 7×5 + Strike Dollar Delta)*\n"
+            f"• 5-Pillar: `{c_score:+d}/100` (Conf `{c_conf}%`) | `Net GEX {iq['net_gex_m']:+.2f}$M` | `Flip {iq.get('flip_fut', fut_px):,.1f}` | `Vanna {iq['vanna_crush_gc']:+.1f} GC` | `Charm {iq['charm_1h_gc']:+.1f} GC/h`"
+        )
+        return (out_path, caption)
+    except Exception as e:
+        print(f"⚠️ Institutional dashboard render error: {e}")
+        return None
+
+
 def build_final_master_conclusion(snap: HizeirisSnapshot, exact_calc: Dict) -> str:
     """
     สร้างข้อความสุดท้าย: "🏆 บทสรุปสุดท้าย: แผนการเล่นฟันธง (ฉบับเข้าใจง่าย — อิงราคาและสถานการณ์จริงหน้างาน)"
@@ -3838,6 +4165,10 @@ def _bs_norm_pdf(x: float) -> float:
     return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
 
 
+def _bs_norm_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
 def compute_institutional_quant_models(
     snap: HizeirisSnapshot,
     exact_calc: Dict,
@@ -4050,6 +4381,140 @@ def compute_institutional_quant_models(
     else:
         signal_bias = "🟡 NEUTRAL · PLAY EDGES"
 
+    # --- G) 3 Dealer Positioning Models (Standard +C/-P, Short Wings -C/-P, Gold Rally -C/+P) ---
+    def _eval_dealer_model(c_sign: float, p_sign: float, model_label: str) -> Dict[str, object]:
+        m_gex = round((c_sign * snap.oi_c * g_call + p_sign * snap.oi_p * g_put) * gex_scale, 2)
+        m_vanna = round(max(min(c_sign * snap.oi_c * (-van_call) + p_sign * snap.oi_p * (-van_put), 500.0), -500.0), 1)
+        m_charm = round(max(min(c_sign * snap.oi_c * ch_call + p_sign * snap.oi_p * ch_put, 250.0), -250.0), 1)
+        m_reg = "+GEX (Pinning)" if m_gex >= 0 else "-GEX (Accel)"
+        return {
+            "label": model_label,
+            "net_gex_m": m_gex,
+            "vanna_gc": m_vanna,
+            "charm_gc": m_charm,
+            "regime": m_reg,
+        }
+
+    dealer_models = {
+        "standard": _eval_dealer_model(1.0, -1.0, "Standard (+C/-P)"),
+        "short_wings": _eval_dealer_model(-1.0, -1.0, "Short Wings (-C/-P)"),
+        "gold_rally": _eval_dealer_model(-1.0, 1.0, "Gold Rally (-C/+P)"),
+    }
+
+    # --- H) Continuous Net Dealer GEX Curve ($M / 1% Move vs Gold Futures) & Full 7x5 2D Stress Matrix ---
+    cw_fut = max(float(snap.call_wall), fut_px + 20.0)
+    pw_fut = min(float(snap.put_wall), fut_px - 20.0)
+    mp_fut = float(snap.max_pain) if float(snap.max_pain) > 1000.0 else fut_px
+    diff_val = max(fut_px - spot, -200.0)
+    flip_fut = round(gamma_flip + diff_val, 1)
+
+    def _gex_vanna_charm_at(S_val: float, sig_val: float) -> Tuple[float, float, float]:
+        sig_use = max(sig_val, 0.05)
+        s_t = max(sqrt_T, 0.005)
+        def _gvc(K_val: float) -> Tuple[float, float, float]:
+            if K_val <= 100.0 or S_val <= 100.0:
+                return 0.0, 0.0, 0.0
+            d1_k = (math.log(S_val / K_val) + 0.5 * sig_use * sig_use * T) / (sig_use * s_t)
+            d2_k = d1_k - sig_use * s_t
+            pdf_k = _bs_norm_pdf(d1_k)
+            gam_k = pdf_k / (S_val * sig_use * s_t)
+            van_k = (-pdf_k * d2_k / sig_use) * 0.01
+            chm_k = (pdf_k * d2_k / (2.0 * T)) / 8760.0
+            return gam_k, van_k, chm_k
+
+        gc_k, vc_k, cc_k = _gvc(cw_fut)
+        gp_k, vp_k, cp_k = _gvc(pw_fut)
+        gm_k, vm_k, cm_k = _gvc(mp_fut)
+        # Blend Call Wall, Put Wall, and Max Pain cluster (Standard +C/-P)
+        scale_k = 100.0 * 0.01 * (S_val ** 2) / 1e6
+        c_oi_w = snap.oi_c * 0.72
+        p_oi_w = snap.oi_p * 0.72
+        m_oi_w = (snap.oi_c - snap.oi_p) * 0.28
+        gex_val = (c_oi_w * gc_k - p_oi_w * gp_k + m_oi_w * gm_k) * scale_k
+        vanna_val = c_oi_w * (-vc_k) - p_oi_w * (-vp_k) + m_oi_w * (-vm_k)
+        charm_val = c_oi_w * cc_k - p_oi_w * cp_k + m_oi_w * cm_k
+        return round(gex_val, 2), round(max(min(vanna_val, 600.0), -600.0), 1), round(max(min(charm_val, 300.0), -300.0), 1)
+
+    lo_curve = min(pw_fut - 60.0, fut_px - 140.0)
+    hi_curve = max(cw_fut + 60.0, fut_px + 140.0)
+    gex_curve: List[Tuple[float, float]] = []
+    for i in range(41):
+        px_i = round(lo_curve + (hi_curve - lo_curve) * (i / 40.0), 1)
+        g_i, _, _ = _gex_vanna_charm_at(px_i, sigma)
+        gex_curve.append((px_i, g_i))
+
+    # Full 7x5 2D Price x IV Forced Hedge Matrix (+1h Forward, GC Contracts & $M)
+    dp_rows = [-75, -50, -25, 0, 25, 50, 75]
+    div_cols = [-5, -2, 0, 2, 5]
+    stress_matrix_2d: List[Dict[str, object]] = []
+    for dp in dp_rows:
+        s_sim = fut_px + dp
+        row_cells = []
+        g_sim, v_sim, c_sim = _gex_vanna_charm_at(s_sim, sigma)
+        # Integrate approximate Gamma hedge from fut_px to s_sim using midpoint GEX
+        g_mid = 0.5 * (net_gex_m + g_sim)
+        g_mid_gc_per_1pct = (g_mid * 1e6) / max(100.0 * s_sim, 1.0)
+        gamma_hedge_gc = -g_mid_gc_per_1pct * (dp / max(0.01 * fut_px, 1.0))
+        for div_pct in div_cols:
+            # div_pct < 0 means IV crush (positive Vanna flow if v_sim > 0)
+            vanna_hedge_gc = v_sim * (-div_pct)
+            total_gc = int(round(max(min(gamma_hedge_gc + vanna_hedge_gc + c_sim, 999.0), -999.0)))
+            notional_m = round(total_gc * 100.0 * s_sim / 1e6, 1)
+            row_cells.append({"div": div_pct, "gc": total_gc, "m": notional_m})
+        stress_matrix_2d.append({"dp": dp, "fut": int(round(s_sim)), "cells": row_cells})
+
+    # --- I) Strike-Level Greek-Weighted Matrix (Top-7 Key Strikes ±150 pts with Dollar Delta $M) ---
+    r1_pts = max(float(exact_calc["sd_table_exact"]["range_1sd"]), 20.0)
+    cand_strikes = [
+        (round((pw_fut - 25.0) / 5.0) * 5.0, "-GEX ZONE", 0.08, 0.24),
+        (round(pw_fut / 5.0) * 5.0, "PUT WALL", 0.06, 0.42),
+        (round((fut_px - r1_pts * 0.6) / 5.0) * 5.0, "-GEX ZONE" if spot < gamma_flip else "+GEX ZONE", 0.14, 0.18),
+        (round(fut_px / 5.0) * 5.0, "ATM", 0.18, 0.12),
+        (round(mp_fut / 5.0) * 5.0, "PIN MAGNET", 0.22, 0.08),
+        (round(cw_fut / 5.0) * 5.0, "CALL WALL", 0.36, 0.05),
+        (round((cw_fut + 25.0) / 5.0) * 5.0, "+GEX ZONE", 0.16, 0.03),
+    ]
+    seen_k = set()
+    strike_matrix: List[Dict[str, object]] = []
+    for k_val, r_tag, c_w, p_w in sorted(cand_strikes, key=lambda x: x[0]):
+        if k_val in seen_k or k_val < 1000.0:
+            continue
+        seen_k.add(k_val)
+        dist_k = round(k_val - fut_px, 1)
+        # Smile-adjusted IV at strike K
+        moneyness = (k_val - fut_px) / max(r1_pts, 15.0)
+        iv_k = round(max(atm_iv + (p_wing - atm_iv) * max(-moneyness, 0.0) * 0.65 + (c_wing - atm_iv) * max(moneyness, 0.0) * 0.65, 8.0), 2)
+        sig_k = iv_k / 100.0
+        d1_k = (math.log(fut_px / k_val) + 0.5 * sig_k * sig_k * T) / max(sig_k * sqrt_T, 1e-4)
+        d2_k = d1_k - sig_k * sqrt_T
+        pdf_k = _bs_norm_pdf(d1_k)
+        delta_c = _bs_norm_cdf(d1_k)
+        delta_p = delta_c - 1.0
+        gam_k = pdf_k / max(fut_px * sig_k * sqrt_T, 1e-4)
+        van_k = (-pdf_k * d2_k / sig_k) * 0.01
+        chm_k = (pdf_k * d2_k / (2.0 * T)) / 8760.0
+        c_oi_k = int(round(snap.oi_c * c_w))
+        p_oi_k = int(round(snap.oi_p * p_w))
+        k_gex_m = round((c_oi_k - p_oi_k) * gam_k * gex_scale, 2)
+        k_vanna = round(max(min((c_oi_k - p_oi_k) * (-van_k), 200.0), -200.0), 1)
+        k_charm = round(max(min((c_oi_k - p_oi_k) * chm_k, 100.0), -100.0), 1)
+        # Dealer Dollar Delta ($M): Standard (+Call / -Put) -> Dealer holds +Call_OI*Delta_C - Put_OI*Delta_P
+        k_ddelta_m = round((c_oi_k * delta_c - p_oi_k * delta_p) * 100.0 * fut_px / 1e6, 2)
+        strike_matrix.append({
+            "strike": int(round(k_val)),
+            "dist": dist_k,
+            "call_oi": c_oi_k,
+            "put_oi": p_oi_k,
+            "iv_pct": iv_k,
+            "net_gex_m": k_gex_m,
+            "vanna_gc": k_vanna,
+            "charm_gc": k_charm,
+            "dollar_delta_m": k_ddelta_m,
+            "role_tag": r_tag,
+        })
+
+    top_dd_row = max(strike_matrix, key=lambda r: abs(float(r["dollar_delta_m"]))) if strike_matrix else {"strike": int(round(pw_fut)), "dollar_delta_m": 0.0, "role_tag": "PUT WALL"}
+
     return {
         "rv_12h": rv_12h,
         "garch_vol": garch_vol,
@@ -4061,6 +4526,7 @@ def compute_institutional_quant_models(
         "term_short": term_short,
         "net_gex_m": net_gex_m,
         "gamma_flip": gamma_flip,
+        "flip_fut": flip_fut,
         "dist_flip": dist_flip,
         "gex_zone": gex_zone,
         "gex_short": gex_short,
@@ -4083,6 +4549,11 @@ def compute_institutional_quant_models(
         "confluence_score": confluence_score,
         "confidence_pct": confidence_pct,
         "signal_bias": signal_bias,
+        "dealer_models": dealer_models,
+        "gex_curve": gex_curve,
+        "stress_matrix_2d": stress_matrix_2d,
+        "strike_matrix": strike_matrix,
+        "top_dd_row": top_dd_row,
     }
 
 
@@ -4446,6 +4917,8 @@ def build_clean_section_messages(
         f"   • *P4 25D RR & Surface (`{iq['p4_score']:+d}/20`)*: `25D RR {iq['rr_25d']:+.2f}%` | `BF {iq['bf_25d']:+.2f}%` | `ΔSurface {iq['parallel_repricing']:+.2f}%` vs `Drift {iq['skew_drift']:+.2f}%`\n"
         f"   • *P5 Flow & VRP (`{iq['p5_score']:+d}/20`)*: `IV {snap.atm_iv:.1f}%` vs `12h RV {iq['rv_12h']:.1f}%` (`GARCH {iq['garch_vol']:.1f}%`) -> *VRP `{iq['vrp']:+.2f}%`* (`{iq['quadrant_code']}`)\n"
         f"   • *Term Structure*: {iq['term_state']} | *2D Stress (+1h)*: ลง `-50` เจ้ามือ `{iq['stress_down50_gc']:+d} GC` / ขึ้น `+50` เจ้ามือ `{iq['stress_up50_gc']:+d} GC`\n"
+        f"   • *3 โหมดเจ้ามือ*: Std(`+C/-P`) `{iq['dealer_models']['standard']['net_gex_m']:+.1f}$M` | ShortWings(`-C/-P`) `{iq['dealer_models']['short_wings']['net_gex_m']:+.1f}$M` | GoldRally(`-C/+P`) `{iq['dealer_models']['gold_rally']['net_gex_m']:+.1f}$M`\n"
+        f"   • *Dollar Delta สูงสุด*: Strike `{iq['top_dd_row']['strike']}` (`{iq['top_dd_row']['role_tag']}`) = `{iq['top_dd_row']['dollar_delta_m']:+.2f}$M`\n"
         f"   • *Verified Win Rate*: {led['summary_str']}\n\n"
         f"5️⃣ *บันทึกสถานะ First Touch วันนี้*: {touched_str}"
     )
@@ -5052,11 +5525,17 @@ def run_once():
         print(f"📋 เพิ่มข้อความสรุปสถิติปิดวัน (EOD Quant Scorecard) สำหรับสัญญา {snap.contract_name} เรียบร้อย!")
     send_telegram_parts(section_messages, CONFIG["TELEGRAM_BOT_TOKEN"], CONFIG["TELEGRAM_CHAT_ID"])
 
-    # สร้างและส่ง "ภาพสรุปแผนการเล่นฟันธงฉบับเข้าใจง่าย" ปิดท้ายรายงานเป็นลำดับสุดท้าย
+    # สร้างและส่ง [ภาพที่ 5] สรุปแผนการเล่นฟันธง + [ภาพที่ 6] แผงวิเคราะห์เจ้ามือระดับสถาบัน (GEX Curve + 2D Matrix 7x5 + Strike Dollar Delta)
+    closing_photos = []
     final_plan_photo = render_final_plan_summary_image(snap, exact_calc, first_touch_map)
-    if not CONFIG["DRY_RUN"] and final_plan_photo is not None:
+    if final_plan_photo is not None:
+        closing_photos.append(final_plan_photo)
+    inst_dash_photo = render_institutional_dealer_dashboard_image(snap, exact_calc, inst_quant, signal_ledger)
+    if inst_dash_photo is not None:
+        closing_photos.append(inst_dash_photo)
+    if not CONFIG["DRY_RUN"] and closing_photos:
         send_telegram_photos(
-            [final_plan_photo],
+            closing_photos,
             CONFIG["TELEGRAM_BOT_TOKEN"],
             CONFIG["TELEGRAM_CHAT_ID"],
         )
