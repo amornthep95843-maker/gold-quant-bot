@@ -1,69 +1,81 @@
 {
   "trading_day": "2026-11-26",
+<<<<<<< Updated upstream
   "updated_th": "2026-11-26 08:37",
+=======
+  "updated_th": "2026-11-26 08:39",
+>>>>>>> Stashed changes
   "contract": "OG4X6",
   "round_str": "รอบ 89/89",
   "dte": 1.71,
   "dte_lock": false,
+<<<<<<< Updated upstream
   "open_spot": 3592.3,
   "spot_now": 3559.76,
   "put_wall": 3472.5,
   "call_wall": 3722.5,
   "max_pain": 3622.5,
+=======
+  "open_spot": 3619.8,
+  "spot_now": 3558.36,
+  "put_wall": 3500.0,
+  "call_wall": 3750.0,
+  "max_pain": 3650.0,
+>>>>>>> Stashed changes
   "zones": [
     {
       "id": "BUY_1SD",
       "side": "BUY",
-      "entry": 3526.06,
-      "tp1": 3534.06,
-      "tp2": 3538.06,
-      "sl_normal": 3518.06,
-      "sl_rec1": 3513.56,
-      "rec1_tp": 3501.06,
-      "status": "FRESH"
+      "entry": 3553.56,
+      "tp1": 3561.56,
+      "tp2": 3565.56,
+      "sl_normal": 3545.56,
+      "sl_rec1": 3541.06,
+      "rec1_tp": 3528.56,
+      "status": "TOUCHED"
     },
     {
       "id": "BUY_2SD",
       "side": "BUY",
-      "entry": 3459.81,
-      "tp1": 3474.81,
-      "tp2": 3484.81,
-      "sl_normal": 3451.81,
-      "sl_rec1": 3447.31,
-      "rec1_tp": 3434.81,
+      "entry": 3487.31,
+      "tp1": 3502.31,
+      "tp2": 3512.31,
+      "sl_normal": 3479.31,
+      "sl_rec1": 3474.81,
+      "rec1_tp": 3462.31,
       "status": "FRESH"
     },
     {
       "id": "SELL_1SD",
       "side": "SELL",
-      "entry": 3658.54,
-      "tp1": 3650.54,
-      "tp2": 3646.54,
-      "sl_normal": 3666.54,
-      "sl_rec1": 3671.04,
-      "rec1_tp": 3683.54,
+      "entry": 3686.04,
+      "tp1": 3678.04,
+      "tp2": 3674.04,
+      "sl_normal": 3694.04,
+      "sl_rec1": 3698.54,
+      "rec1_tp": 3711.04,
       "status": "FRESH"
     },
     {
       "id": "SELL_2SD",
       "side": "SELL",
-      "entry": 3724.79,
-      "tp1": 3709.79,
-      "tp2": 3699.79,
-      "sl_normal": 3732.79,
-      "sl_rec1": 3737.29,
-      "rec1_tp": 3749.79,
+      "entry": 3752.29,
+      "tp1": 3737.29,
+      "tp2": 3727.29,
+      "sl_normal": 3760.29,
+      "sl_rec1": 3764.79,
+      "rec1_tp": 3777.29,
       "status": "FRESH"
     },
     {
       "id": "PUT_WALL",
       "side": "BUY",
-      "entry": 3472.5,
-      "tp1": 3482.5,
-      "tp2": 3497.5,
-      "sl_normal": 3464.5,
-      "sl_rec1": 3460.0,
-      "rec1_tp": 3447.5,
+      "entry": 3500.0,
+      "tp1": 3510.0,
+      "tp2": 3525.0,
+      "sl_normal": 3492.0,
+      "sl_rec1": 3487.5,
+      "rec1_tp": 3475.0,
       "status": "FRESH"
     }
   ]
