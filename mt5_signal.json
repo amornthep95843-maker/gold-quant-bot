@@ -1,15 +1,15 @@
 {
   "trading_day": "2026-11-26",
-  "updated_th": "2026-11-26 21:52",
+  "updated_th": "2026-11-26 22:07",
   "contract": "OG4X6",
-  "round_str": "รอบ 162/162",
-  "dte": 1.16,
+  "round_str": "รอบ 165/165",
+  "dte": 1.15,
   "dte_lock": false,
   "open_spot": 3592.3,
-  "spot_now": 3576.07,
+  "spot_now": 3576.01,
   "put_wall": 3472.5,
   "call_wall": 3622.5,
-  "max_pain": 3572.5,
+  "max_pain": 3567.5,
   "zones": [
     {
       "id": "BUY_1SD",
