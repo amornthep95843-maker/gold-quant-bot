@@ -1,7 +1,7 @@
 {
-  "trading_day": "2026-11-26",
+  "trading_day": "2026-11-27",
   "contract_name": "OG4X6",
-  "timestamp": "2026-11-27 05:34",
+  "timestamp": "2026-11-27 06:04",
   "round_str": "รอบ 212/212 เวลา 04:45 (เข้า 04:47)",
   "daily_open_fut": 3619.8,
   "daily_open_spot": 3592.3,
@@ -36,7 +36,7 @@
   },
   "round_history": [
     {
-      "time": "05:34",
+      "time": "06:04",
       "round_str": "รอบ 212/212 เวลา 04:45 (เข้า 04:47)",
       "dte": 0.86,
       "live_1sd": 59.1,
