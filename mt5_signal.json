@@ -1,22 +1,12 @@
 {
   "trading_day": "2026-11-26",
-<<<<<<< Updated upstream
-  "updated_th": "2026-11-26 19:22",
+  "updated_th": "2026-11-26 19:38",
   "contract": "OG4X6",
-  "round_str": "รอบ 132/132",
-  "dte": 1.26,
+  "round_str": "รอบ 135/135",
+  "dte": 1.25,
   "dte_lock": false,
   "open_spot": 3592.3,
-  "spot_now": 3566.43,
-=======
-  "updated_th": "2026-11-26 19:24",
-  "contract": "OG4X6",
-  "round_str": "รอบ 133/133",
-  "dte": 1.26,
-  "dte_lock": false,
-  "open_spot": 3592.3,
-  "spot_now": 3565.4,
->>>>>>> Stashed changes
+  "spot_now": 3571.99,
   "put_wall": 3472.5,
   "call_wall": 3622.5,
   "max_pain": 3572.5,
