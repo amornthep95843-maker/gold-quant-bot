@@ -1,9 +1,9 @@
 {
   "trading_day": "2026-11-26",
-  "updated_th": "2026-11-27 03:35",
+  "updated_th": "2026-11-27 04:04",
   "contract": "OG4X6",
-  "round_str": "รอบ 207/207 เวลา 03:30 (เข้า 03:32)",
-  "dte": 0.92,
+  "round_str": "รอบ 209/209 เวลา 04:00 (เข้า 04:02)",
+  "dte": 0.9,
   "dte_lock": false,
   "open_spot": 3592.3,
   "spot_now": 3566.3,
