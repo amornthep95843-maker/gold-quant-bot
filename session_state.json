@@ -1,7 +1,11 @@
 {
   "trading_day": "2026-11-26",
   "contract_name": "OG4X6",
+<<<<<<< Updated upstream
   "timestamp": "2026-11-27 05:04",
+=======
+  "timestamp": "2026-11-27 05:06",
+>>>>>>> Stashed changes
   "round_str": "รอบ 212/212 เวลา 04:45 (เข้า 04:47)",
   "daily_open_fut": 3619.8,
   "daily_open_spot": 3592.3,
@@ -356,6 +360,7 @@
       "call_wall": 3650.0
     },
     {
+<<<<<<< Updated upstream
       "time": "04:04",
       "round_str": "รอบ 209/209 เวลา 04:00 (เข้า 04:02)",
       "dte": 0.9,
@@ -397,6 +402,9 @@
     },
     {
       "time": "05:04",
+=======
+      "time": "05:06",
+>>>>>>> Stashed changes
       "round_str": "รอบ 212/212 เวลา 04:45 (เข้า 04:47)",
       "dte": 0.86,
       "live_1sd": 59.1,
