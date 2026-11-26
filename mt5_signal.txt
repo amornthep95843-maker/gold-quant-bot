@@ -1,11 +1,19 @@
 TRADING_DAY=2026-11-26
+<<<<<<< Updated upstream
 UPDATED_TH=2026-11-26 14:07
+=======
+UPDATED_TH=2026-11-26 14:09
+>>>>>>> Stashed changes
 CONTRACT=OG4X6
 ROUND_STR=รอบ 111/111
 DTE=1.48
 DTE_LOCK=0
 OPEN_SPOT=3592.30
+<<<<<<< Updated upstream
 SPOT_NOW=3571.30
+=======
+SPOT_NOW=3568.28
+>>>>>>> Stashed changes
 PUT_WALL=3472.50
 CALL_WALL=3622.50
 MAX_PAIN=3572.50
