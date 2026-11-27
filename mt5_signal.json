@@ -1,12 +1,12 @@
 {
   "trading_day": "2026-11-27",
-  "updated_th": "2026-11-27 12:04",
+  "updated_th": "2026-11-27 12:35",
   "contract": "OG4X6",
-  "round_str": "รอบ 235/235 เวลา 12:00 (เข้า 12:02)",
-  "dte": 0.56,
+  "round_str": "รอบ 237/237 เวลา 12:30 (เข้า 12:32)",
+  "dte": 0.54,
   "dte_lock": false,
   "open_spot": 3592.6,
-  "spot_now": 3638.41,
+  "spot_now": 3655.2,
   "put_wall": 3550.0,
   "call_wall": 3600.0,
   "max_pain": 3600.0,
@@ -42,7 +42,7 @@
       "sl_normal": 3657.62,
       "sl_rec1": 3662.12,
       "rec1_tp": 3674.62,
-      "status": "FRESH"
+      "status": "PASSED"
     },
     {
       "id": "SELL_2SD",
