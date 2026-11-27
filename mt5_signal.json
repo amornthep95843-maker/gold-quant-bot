@@ -1,20 +1,12 @@
 {
   "trading_day": "2026-11-27",
-<<<<<<< Updated upstream
-  "updated_th": "2026-11-27 10:04",
-=======
-  "updated_th": "2026-11-27 10:06",
->>>>>>> Stashed changes
+  "updated_th": "2026-11-27 10:35",
   "contract": "OG4X6",
-  "round_str": "รอบ 227/227 เวลา 10:00 (เข้า 10:02)",
-  "dte": 0.64,
+  "round_str": "รอบ 229/229 เวลา 10:30 (เข้า 10:32)",
+  "dte": 0.62,
   "dte_lock": false,
   "open_spot": 3565.1,
-<<<<<<< Updated upstream
-  "spot_now": 3631.85,
-=======
-  "spot_now": 3630.53,
->>>>>>> Stashed changes
+  "spot_now": 3628.41,
   "put_wall": 3522.5,
   "call_wall": 3572.5,
   "max_pain": 3572.5,
