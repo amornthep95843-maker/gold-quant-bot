@@ -1,8 +1,8 @@
 {
   "trading_day": "2026-11-27",
   "contract_name": "OG4X6",
-  "timestamp": "2026-11-27 17:04",
-  "round_str": "รอบ 255/255 เวลา 17:00 (เข้า 17:02)",
+  "timestamp": "2026-11-27 17:34",
+  "round_str": "รอบ 257/257 เวลา 17:30 (เข้า 17:32)",
   "daily_open_fut": 3592.6,
   "daily_open_spot": 3592.6,
   "open_iv": 33.9,
@@ -14,14 +14,14 @@
   "sell_2sd": 3706.63,
   "buy_3sd": 3421.55,
   "sell_3sd": 3763.65,
-  "futures_price": 3670.12,
-  "spot_price": 3670.12,
+  "futures_price": 3673.62,
+  "spot_price": 3673.62,
   "diff": 0.0,
   "atm_iv": 33.9,
-  "vol_settle_atm": 40.8,
-  "intraday_c": 5932,
-  "intraday_p": 2074,
-  "put_wall": 3600.0,
+  "vol_settle_atm": 40.56,
+  "intraday_c": 6356,
+  "intraday_p": 2473,
+  "put_wall": 3590.0,
   "call_wall": 3600.0,
   "max_pain": 3630.0,
   "session_high": 3685.39,
@@ -31,7 +31,7 @@
       "status": "PASSED",
       "time": "14:35",
       "price": "3,557.68",
-      "zone_px": "3,600.00"
+      "zone_px": "3,590.00"
     },
     "SELL_1SD": {
       "status": "PASSED",
@@ -332,6 +332,26 @@
       "oi_c": 4016,
       "oi_p": 1515,
       "put_wall": 3600.0,
+      "call_wall": 3600.0
+    },
+    {
+      "time": "17:35",
+      "round_str": "รอบ 257/257 เวลา 17:30 (เข้า 17:32)",
+      "dte": 0.33,
+      "live_1sd": 37.7,
+      "skew_bias": "CALL_SKEW",
+      "fut": 3673.62,
+      "spot": 3673.62,
+      "delta_from_open": "+81.02",
+      "z_sd": "+1.42SD",
+      "atm_iv": 33.9,
+      "vol_chg": -6.66,
+      "intra_c": 6356,
+      "intra_p": 2473,
+      "intra_pc": 0.39,
+      "oi_c": 3888,
+      "oi_p": 1463,
+      "put_wall": 3590.0,
       "call_wall": 3600.0
     }
   ]
